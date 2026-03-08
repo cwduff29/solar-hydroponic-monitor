@@ -249,22 +249,53 @@ Common scenarios:
 | Battery maintenance | `disable_low_battery_alerts`, `disable_capacity_alerts` |
 | Testing (no emails) | `disable_emails` |
 
+## Hardware Setup Scripts
+
+Two helper scripts in `scripts/` make initial hardware wiring verification much easier.
+
+### Identify DS18B20 Sensors
+
+```bash
+python3 scripts/identify_sensors.py
+```
+
+Refreshes every 5 seconds showing each sensor ID and its current temperature. Place sensors one at a time in known locations to identify which ID belongs to which sensor. Press Ctrl+C to print a ready-to-paste `sensor_map` snippet for `config.json`.
+
+### Test Hardware Wiring
+
+```bash
+python3 scripts/test_hardware.py
+```
+
+Interactive 6-section test run before starting the services for the first time:
+1. **Serial port** — confirms `/dev/serial0` is accessible for Renogy Modbus
+2. **BME280** — reads temperature, humidity, and pressure over I2C
+3. **DS18B20** — lists all 1-Wire sensors and reads temperatures
+4. **Relays** — toggles each relay (main pump, backup pump, aerator, fan) with user confirmation
+5. **Flow sensors** — counts pulses on inlet/outlet GPIOs for 10 seconds
+6. **Summary** — color-coded PASS/WARN/FAIL table
+
 ## File Structure
 
 ```
 solar-hydroponic-monitor/
-├── install.sh                    # One-command installer (11 steps)
+├── install.sh                    # One-command installer (12 steps)
 ├── config.json                   # All configuration (edit this, not the scripts)
 ├── credentials.env.example       # Email credentials template
 ├── monitor_common.py             # Shared: AlertManager, email, watchdog, config
 ├── renogy.py                     # Renogy charge controller monitor
 ├── renogy_extended.py            # Renogy Modbus driver with batch reads
+├── battery_shutdown.py           # Graceful shutdown on critical battery SOC
 ├── waterflow_enhanced_failsafe.py # Hydroponic system controller
+├── scripts/
+│   ├── identify_sensors.py       # Map DS18B20 sensor IDs to locations
+│   └── test_hardware.py          # Interactive hardware wiring verification
 ├── prometheus/
 │   └── prometheus.yml            # Prometheus scrape config (installed to /etc/prometheus/)
 ├── systemd/
 │   ├── renogy.service
-│   └── waterflow.service
+│   ├── waterflow.service
+│   └── battery_shutdown.service  # Runs as root, monitors SOC for safe shutdown
 ├── logrotate/
 │   ├── renogy
 │   └── waterflow
