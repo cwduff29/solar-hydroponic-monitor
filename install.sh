@@ -7,6 +7,8 @@ set -euo pipefail
 
 INSTALL_DIR="$(dirname "$(realpath "$0")")"
 SERVICE_USER="${SUDO_USER:-pi}"
+CREDS_DIR="/etc/solar-hydroponic"
+CREDS_FILE="$CREDS_DIR/credentials.env"
 
 # Check root
 if [[ $EUID -ne 0 ]]; then
@@ -19,32 +21,24 @@ echo " Solar Hydroponic Monitor - Installer"
 echo "================================================="
 echo " Install directory : $INSTALL_DIR"
 echo " Service user      : $SERVICE_USER"
+echo " Credentials file  : $CREDS_FILE"
 echo "================================================="
 echo ""
 
-# --- Credentials ---
-if [[ ! -f "$INSTALL_DIR/credentials.py" ]]; then
-    echo ">>> credentials.py not found. Copying from example..."
-    cp "$INSTALL_DIR/credentials.py.example" "$INSTALL_DIR/credentials.py"
-    echo "    IMPORTANT: Edit $INSTALL_DIR/credentials.py before starting services."
-    echo ""
-fi
-
-# --- Python dependencies ---
-echo "[1/9] Installing Python packages..."
-# Try with --break-system-packages for Raspberry Pi OS Bookworm+, fall back for older
+# --- [1/11] Python dependencies ---
+echo "[1/11] Installing Python packages..."
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280
 echo "      Done."
 
-# --- Enable hardware interfaces ---
-echo "[2/9] Installing Prometheus node_exporter..."
+# --- [2/11] Prometheus node_exporter ---
+echo "[2/11] Installing Prometheus node_exporter..."
 apt-get install -y prometheus-node-exporter
 
-# Configure textfile collector to pick up /ramdisk/*.prom files
-OVERRIDE_DIR="/etc/systemd/system/prometheus-node-exporter.service.d"
-mkdir -p "$OVERRIDE_DIR"
-cat > "$OVERRIDE_DIR/textfile.conf" << 'EOF'
+# Override service to add textfile collector pointing at /ramdisk
+NEXPORTER_OVERRIDE="/etc/systemd/system/prometheus-node-exporter.service.d"
+mkdir -p "$NEXPORTER_OVERRIDE"
+cat > "$NEXPORTER_OVERRIDE/textfile.conf" << 'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/prometheus-node-exporter \
@@ -56,14 +50,29 @@ systemctl daemon-reload
 systemctl enable prometheus-node-exporter
 systemctl restart prometheus-node-exporter
 echo "      node_exporter installed and configured."
-echo "      Textfile collector: /ramdisk/*.prom"
-echo "      Metrics endpoint:   http://$(hostname -I | awk '{print $1}'):9100/metrics"
+echo "      Textfile collector : /ramdisk/*.prom"
+echo "      Metrics endpoint   : http://$(hostname -I | awk '{print $1}'):9100/metrics"
 
-# --- Enable hardware interfaces ---
-echo "[3/9] Enabling hardware interfaces..."
+# --- [3/11] Prometheus ---
+echo "[3/11] Installing Prometheus..."
+apt-get install -y prometheus
+
+# Install our scrape config
+mkdir -p /etc/prometheus
+cp "$INSTALL_DIR/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
+chown prometheus:prometheus /etc/prometheus/prometheus.yml 2>/dev/null || true
+systemctl enable prometheus
+systemctl restart prometheus
+echo "      Prometheus installed and configured."
+echo "      Scraping            : localhost:9100"
+echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
+echo "      NOTE: Point your Grafana datasource at http://<PI_IP>:9090"
+
+# --- [4/11] Hardware interfaces ---
+echo "[4/11] Enabling hardware interfaces..."
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_serial_hw 0    # Enable UART hardware
-    raspi-config nonint do_serial_cons 1  # Disable serial login console (needed for /dev/serial0)
+    raspi-config nonint do_serial_cons 1  # Disable serial login console (/dev/serial0)
     raspi-config nonint do_i2c 0          # Enable I2C (BME280)
     raspi-config nonint do_onewire 0      # Enable 1-Wire (DS18B20 temp sensors)
     echo "      Serial (UART, no console), I2C, and 1-Wire enabled."
@@ -75,11 +84,8 @@ else
     echo "        - 1-Wire"
 fi
 
-# --- Hardware watchdog ---
-echo "[4/9] Configuring hardware watchdog..."
-
-# Enable the Pi hardware watchdog in /boot/firmware/config.txt (Bookworm+)
-# or /boot/config.txt (Bullseye and older)
+# --- [5/11] Hardware watchdog ---
+echo "[5/11] Configuring hardware watchdog..."
 CONFIG_TXT=""
 if [[ -f /boot/firmware/config.txt ]]; then
     CONFIG_TXT="/boot/firmware/config.txt"
@@ -92,56 +98,68 @@ if [[ -n "$CONFIG_TXT" ]]; then
         echo "      Hardware watchdog already enabled in $CONFIG_TXT"
     else
         echo "" >> "$CONFIG_TXT"
-        echo "# Hardware watchdog (required for solar_hydroponic monitor)" >> "$CONFIG_TXT"
+        echo "# Hardware watchdog (solar_hydroponic monitor)" >> "$CONFIG_TXT"
         echo "dtparam=watchdog=on" >> "$CONFIG_TXT"
         echo "      Enabled hardware watchdog in $CONFIG_TXT"
     fi
 else
-    echo "      WARNING: Could not find /boot/firmware/config.txt or /boot/config.txt"
-    echo "      Manually add 'dtparam=watchdog=on' to your Pi config file."
+    echo "      WARNING: Could not find Pi config.txt — manually add: dtparam=watchdog=on"
 fi
 
-# Configure watchdog daemon timeout (60 seconds = 2× our 30s keepalive interval)
-# We do this via /etc/systemd/system.conf RuntimeWatchdogSec or modprobe options.
-# The simplest approach on Pi OS is to set the bcm2835_wdt module option.
 MODPROBE_CONF="/etc/modprobe.d/bcm2835_wdt.conf"
 if [[ ! -f "$MODPROBE_CONF" ]]; then
     echo "options bcm2835_wdt heartbeat=60 nowayout=0" > "$MODPROBE_CONF"
-    echo "      Created $MODPROBE_CONF (watchdog timeout=60s, nowayout=0)"
+    echo "      Created $MODPROBE_CONF (watchdog timeout=60s)"
 else
-    echo "      $MODPROBE_CONF already exists, not overwriting."
+    echo "      $MODPROBE_CONF already exists, skipping."
 fi
-
 echo "      NOTE: A reboot is required for watchdog changes to take effect."
 
-# --- User group memberships ---
-echo "[5/9] Adding $SERVICE_USER to hardware groups..."
+# --- [6/11] User group memberships ---
+echo "[6/11] Adding $SERVICE_USER to hardware groups..."
 usermod -aG dialout,gpio,i2c "$SERVICE_USER"
 echo "      Added to: dialout (serial), gpio, i2c"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
-# --- Ramdisk ---
-echo "[6/9] Setting up ramdisk at /ramdisk..."
+# --- [7/11] Ramdisk ---
+echo "[7/11] Setting up ramdisk at /ramdisk..."
 mkdir -p /ramdisk
 if grep -q '/ramdisk' /etc/fstab; then
     echo "      /ramdisk already in /etc/fstab, skipping."
 else
     echo "tmpfs /ramdisk tmpfs nodev,nosuid,size=50M 0 0" >> /etc/fstab
-    echo "      Added tmpfs /ramdisk entry to /etc/fstab."
+    echo "      Added tmpfs /ramdisk to /etc/fstab."
 fi
 mount /ramdisk 2>/dev/null && echo "      Mounted /ramdisk." || echo "      /ramdisk already mounted."
 chown "$SERVICE_USER":root /ramdisk
 chmod 775 /ramdisk
 
-# --- Persistent state directory ---
-echo "[7/9] Creating persistent state directory /var/lib/renogy/..."
+# --- [8/11] Persistent state directory ---
+echo "[8/11] Creating persistent state directory..."
 mkdir -p /var/lib/renogy
 chown "$SERVICE_USER":root /var/lib/renogy
 chmod 750 /var/lib/renogy
-echo "      /var/lib/renogy/ created (stores alert state across reboots)"
+echo "      /var/lib/renogy/ created (alert state survives reboots)"
 
-# --- Log files ---
-echo "[8/9] Creating log files..."
+# --- [9/11] Email credentials ---
+echo "[9/11] Setting up email credentials..."
+mkdir -p "$CREDS_DIR"
+chmod 750 "$CREDS_DIR"
+
+if [[ -f "$CREDS_FILE" ]]; then
+    echo "      $CREDS_FILE already exists, skipping."
+    echo "      To update credentials: sudo nano $CREDS_FILE"
+else
+    cp "$INSTALL_DIR/credentials.env.example" "$CREDS_FILE"
+    chmod 640 "$CREDS_FILE"
+    chown root:"$SERVICE_USER" "$CREDS_FILE"
+    echo "      Created $CREDS_FILE"
+    echo "      *** IMPORTANT: Edit this file with your Gmail credentials ***"
+    echo "      sudo nano $CREDS_FILE"
+fi
+
+# --- [10/11] Log files & logrotate ---
+echo "[10/11] Creating log files..."
 touch /var/log/renogy.log /var/log/waterflow.log
 chown "$SERVICE_USER":adm /var/log/renogy.log /var/log/waterflow.log
 chmod 664 /var/log/renogy.log /var/log/waterflow.log
@@ -152,8 +170,8 @@ cp "$INSTALL_DIR/logrotate/renogy"    /etc/logrotate.d/renogy
 cp "$INSTALL_DIR/logrotate/waterflow" /etc/logrotate.d/waterflow
 echo "      Logrotate configs installed."
 
-# --- Systemd services ---
-echo "[9/9] Installing and enabling systemd services..."
+# --- [11/11] Systemd services ---
+echo "[11/11] Installing and enabling monitor services..."
 sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/renogy.service" > /etc/systemd/system/renogy.service
@@ -166,12 +184,17 @@ systemctl daemon-reload
 systemctl enable renogy.service waterflow.service
 echo "      Services enabled."
 
-if [[ -f "$INSTALL_DIR/credentials.py" ]] && ! grep -q "your_email" "$INSTALL_DIR/credentials.py"; then
+# Only start if credentials have been filled in
+if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then
+    echo ""
+    echo "      *** Services NOT started ***"
+    echo "      Fill in your email credentials first:"
+    echo "        sudo nano $CREDS_FILE"
+    echo "      Then start services:"
+    echo "        sudo systemctl start renogy waterflow"
+else
     systemctl start renogy.service waterflow.service
     echo "      Services started."
-else
-    echo "      Services NOT started — edit credentials.py first, then run:"
-    echo "        sudo systemctl start renogy waterflow"
 fi
 
 echo ""
@@ -179,20 +202,26 @@ echo "================================================="
 echo " Installation complete!"
 echo "================================================="
 echo ""
-echo " Next steps:"
-echo "   1. Edit credentials.py with your email settings"
+echo " Required next steps:"
+echo "   1. Fill in email credentials (if not done):"
+echo "        sudo nano $CREDS_FILE"
 echo "   2. Reboot to apply interface, watchdog, and group changes:"
 echo "        sudo reboot"
+echo ""
+echo " Grafana datasource:"
+echo "   Add a Prometheus datasource pointing at:"
+echo "   http://$(hostname -I | awk '{print $1}'):9090"
 echo ""
 echo " Config reload without restart (SIGHUP):"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value renogy)"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value waterflow)"
 echo ""
 echo " Service management:"
-echo "   sudo systemctl status renogy waterflow prometheus-node-exporter"
+echo "   sudo systemctl status renogy waterflow prometheus prometheus-node-exporter"
 echo "   sudo journalctl -u renogy -f"
 echo "   sudo journalctl -u waterflow -f"
 echo ""
-echo " Verify metrics are being exported:"
+echo " Verify metrics:"
 echo "   curl http://localhost:9100/metrics | grep waterflow_inlet_lpm"
+echo "   curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm"
 echo ""

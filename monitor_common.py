@@ -84,11 +84,20 @@ def reload_config():
 
 def send_email(subject, body, disabled=False):
     """
-    Send an email using credentials from credentials.py.
+    Send an email using credentials from environment variables.
+
+    Required env vars (set via /etc/solar-hydroponic/credentials.env):
+        SMTP_USER        Gmail address
+        SMTP_PASSWORD    Gmail App Password (16 chars, not your account password)
+        SMTP_RECIPIENTS  Comma-separated recipient addresses
+
+    Optional env vars (defaults work for Gmail):
+        SMTP_SERVER      Default: smtp.gmail.com
+        SMTP_PORT        Default: 587
 
     Args:
-        subject: Email subject line
-        body: Email body text
+        subject:  Email subject line
+        body:     Email body text
         disabled: If True, suppress sending and log instead
 
     Returns:
@@ -98,16 +107,28 @@ def send_email(subject, body, disabled=False):
         logging.info(f"[EMAILS DISABLED] Email suppressed: '{subject}'")
         return False
 
+    smtp_server     = os.environ.get('SMTP_SERVER',     'smtp.gmail.com')
+    smtp_port       = int(os.environ.get('SMTP_PORT',   '587'))
+    smtp_user       = os.environ.get('SMTP_USER',       '')
+    smtp_password   = os.environ.get('SMTP_PASSWORD',   '')
+    smtp_recipients = os.environ.get('SMTP_RECIPIENTS', '')
+
+    if not smtp_user or not smtp_password:
+        logging.error(
+            "Email credentials missing — set SMTP_USER and SMTP_PASSWORD "
+            "in /etc/solar-hydroponic/credentials.env"
+        )
+        return False
+
     try:
-        import credentials as cr
         msg = EmailMessage()
-        msg['From'] = cr.username
-        msg['To'] = cr.recipients
+        msg['From']    = smtp_user
+        msg['To']      = smtp_recipients
         msg['Subject'] = subject
         msg.set_content(body)
-        with smtplib.SMTP(cr.server, cr.port) as server:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
-            server.login(cr.username, cr.password)
+            server.login(smtp_user, smtp_password)
             server.send_message(msg)
         return True
     except Exception as e:
