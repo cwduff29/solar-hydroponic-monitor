@@ -31,14 +31,36 @@ if [[ ! -f "$INSTALL_DIR/credentials.py" ]]; then
 fi
 
 # --- Python dependencies ---
-echo "[1/8] Installing Python packages..."
+echo "[1/9] Installing Python packages..."
 # Try with --break-system-packages for Raspberry Pi OS Bookworm+, fall back for older
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280
 echo "      Done."
 
 # --- Enable hardware interfaces ---
-echo "[2/8] Enabling hardware interfaces..."
+echo "[2/9] Installing Prometheus node_exporter..."
+apt-get install -y prometheus-node-exporter
+
+# Configure textfile collector to pick up /ramdisk/*.prom files
+OVERRIDE_DIR="/etc/systemd/system/prometheus-node-exporter.service.d"
+mkdir -p "$OVERRIDE_DIR"
+cat > "$OVERRIDE_DIR/textfile.conf" << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/prometheus-node-exporter \
+  --collector.textfile.directory=/ramdisk \
+  --collector.systemd \
+  --collector.processes
+EOF
+systemctl daemon-reload
+systemctl enable prometheus-node-exporter
+systemctl restart prometheus-node-exporter
+echo "      node_exporter installed and configured."
+echo "      Textfile collector: /ramdisk/*.prom"
+echo "      Metrics endpoint:   http://$(hostname -I | awk '{print $1}'):9100/metrics"
+
+# --- Enable hardware interfaces ---
+echo "[3/9] Enabling hardware interfaces..."
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_serial_hw 0    # Enable UART hardware
     raspi-config nonint do_serial_cons 1  # Disable serial login console (needed for /dev/serial0)
@@ -54,7 +76,7 @@ else
 fi
 
 # --- Hardware watchdog ---
-echo "[3/8] Configuring hardware watchdog..."
+echo "[4/9] Configuring hardware watchdog..."
 
 # Enable the Pi hardware watchdog in /boot/firmware/config.txt (Bookworm+)
 # or /boot/config.txt (Bullseye and older)
@@ -93,13 +115,13 @@ fi
 echo "      NOTE: A reboot is required for watchdog changes to take effect."
 
 # --- User group memberships ---
-echo "[4/8] Adding $SERVICE_USER to hardware groups..."
+echo "[5/9] Adding $SERVICE_USER to hardware groups..."
 usermod -aG dialout,gpio,i2c "$SERVICE_USER"
 echo "      Added to: dialout (serial), gpio, i2c"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
 # --- Ramdisk ---
-echo "[5/8] Setting up ramdisk at /ramdisk..."
+echo "[6/9] Setting up ramdisk at /ramdisk..."
 mkdir -p /ramdisk
 if grep -q '/ramdisk' /etc/fstab; then
     echo "      /ramdisk already in /etc/fstab, skipping."
@@ -112,14 +134,14 @@ chown "$SERVICE_USER":root /ramdisk
 chmod 775 /ramdisk
 
 # --- Persistent state directory ---
-echo "[6/8] Creating persistent state directory /var/lib/renogy/..."
+echo "[7/9] Creating persistent state directory /var/lib/renogy/..."
 mkdir -p /var/lib/renogy
 chown "$SERVICE_USER":root /var/lib/renogy
 chmod 750 /var/lib/renogy
 echo "      /var/lib/renogy/ created (stores alert state across reboots)"
 
 # --- Log files ---
-echo "[7/8] Creating log files..."
+echo "[8/9] Creating log files..."
 touch /var/log/renogy.log /var/log/waterflow.log
 chown "$SERVICE_USER":adm /var/log/renogy.log /var/log/waterflow.log
 chmod 664 /var/log/renogy.log /var/log/waterflow.log
@@ -131,7 +153,7 @@ cp "$INSTALL_DIR/logrotate/waterflow" /etc/logrotate.d/waterflow
 echo "      Logrotate configs installed."
 
 # --- Systemd services ---
-echo "[8/8] Installing and enabling systemd services..."
+echo "[9/9] Installing and enabling systemd services..."
 sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/renogy.service" > /etc/systemd/system/renogy.service
@@ -167,8 +189,10 @@ echo "   sudo kill -HUP \$(systemctl show -p MainPID --value renogy)"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value waterflow)"
 echo ""
 echo " Service management:"
-echo "   sudo systemctl status renogy"
-echo "   sudo systemctl status waterflow"
+echo "   sudo systemctl status renogy waterflow prometheus-node-exporter"
 echo "   sudo journalctl -u renogy -f"
 echo "   sudo journalctl -u waterflow -f"
+echo ""
+echo " Verify metrics are being exported:"
+echo "   curl http://localhost:9100/metrics | grep waterflow_inlet_lpm"
 echo ""
