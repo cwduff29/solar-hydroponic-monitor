@@ -4,7 +4,7 @@ A Raspberry Pi-based monitoring and control system for a solar-powered NFT (Nutr
 
 ## Hardware
 
-- Raspberry Pi Zero (or equivalent)
+- Raspberry Pi (Zero or equivalent)
 - Renogy solar charge controller (Modbus/RS-485)
 - Dual YF-S201 water flow sensors (inlet + outlet)
 - BME280 I2C sensor (enclosure temperature, humidity, pressure)
@@ -33,16 +33,21 @@ A Raspberry Pi-based monitoring and control system for a solar-powered NFT (Nutr
 
 ## Architecture
 
-Three Python scripts run as systemd services:
+```
+renogy.py          ──┐
+                     ├──▶  /ramdisk/*.prom  ──▶  node_exporter :9100  ──▶  Prometheus :9090  ──▶  Grafana (Proxmox)
+waterflow.py       ──┘        (tmpfs)
+```
 
-| Script | Purpose |
-|--------|---------|
+| Service | Purpose |
+|---------|---------|
 | `renogy.py` | Reads Renogy charge controller via Modbus, exports solar/battery metrics |
-| `waterflow_enhanced_failsafe.py` | Controls pumps/aeration/fan, monitors sensors |
-| *(node_exporter)* | Ships `/ramdisk/*.prom` textfiles to Prometheus |
+| `waterflow_enhanced_failsafe.py` | Controls pumps/aeration/fan, monitors all sensors |
+| `prometheus-node-exporter` | Exposes `/ramdisk/*.prom` textfiles + system metrics on port 9100 |
+| `prometheus` | Scrapes node_exporter locally, serves metrics API on port 9090 |
 
 Shared code lives in `monitor_common.py` (alert management, email, watchdog, daily summaries).
-All configuration is in `config.json` — no code changes needed for threshold tuning.
+All tunable values are in `config.json` — no code edits needed for threshold changes.
 
 ## Installation
 
@@ -51,50 +56,64 @@ All configuration is in `config.json` — no code changes needed for threshold t
 ```bash
 git clone https://github.com/cwduff29/solar-hydroponic-monitor.git
 cd solar-hydroponic-monitor
-cp credentials.py.example credentials.py
-nano credentials.py          # fill in Gmail address and app password
 sudo bash install.sh
+sudo nano /etc/solar-hydroponic/credentials.env   # fill in Gmail credentials
 sudo reboot
 ```
 
-After reboot, verify services are running:
+After reboot, verify all services are running:
 
 ```bash
-sudo systemctl status renogy waterflow prometheus-node-exporter
+sudo systemctl status renogy waterflow prometheus prometheus-node-exporter
 ```
 
 ### Gmail App Password
 
-The system sends alerts via Gmail SMTP. You need a Gmail **App Password** (not your account password):
+Email credentials are stored in `/etc/solar-hydroponic/credentials.env` (outside the repo, root-protected). The system uses Gmail SMTP with an **App Password** — not your Google account password.
 
+**Setup:**
 1. Enable 2-factor authentication on your Google account
-2. Go to Google Account → Security → App Passwords
-3. Create an app password for "Mail"
-4. Use that 16-character password in `credentials.py`
+2. Go to **Google Account → Security → App Passwords**
+3. Create an App Password for "Mail"
+4. Paste the 16-character password (no spaces) into `credentials.env`
+
+**`/etc/solar-hydroponic/credentials.env`:**
+```bash
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASSWORD=yoursixteencharap
+SMTP_RECIPIENTS=recipient@gmail.com
+```
+
+The file is owned by `root`, readable only by `root` and the service user — credentials never touch the project directory or git.
+
+To send to multiple recipients, comma-separate them:
+```bash
+SMTP_RECIPIENTS=you@gmail.com,other@gmail.com
+```
 
 ## Configuration
 
-All tunable values are in `config.json`. Edit it directly on the Pi:
+All tunable values (thresholds, GPIO pins, timing, sensor IDs) are in `config.json`. Edit it on the Pi and reload without restarting:
 
 ```bash
 nano /path/to/solar-hydroponic-monitor/config.json
-```
-
-Then reload without restarting services:
-
-```bash
 sudo kill -HUP $(systemctl show -p MainPID --value renogy)
 sudo kill -HUP $(systemctl show -p MainPID --value waterflow)
 ```
 
-Key configuration sections:
+Key sections:
 
-- `renogy.thresholds` — battery voltage/SOC/temperature alert levels
-- `waterflow.flow` — flow sensor calibration and alert thresholds
-- `waterflow.temperature` — temperature alert thresholds (in °C)
-- `waterflow.battery_load_shedding` — SOC thresholds for load shedding
-- `waterflow.aeration` — aeration on/off timing
-- `alerts` — email cooldown period and daily summary hour
+| Section | Contents |
+|---------|---------|
+| `renogy.thresholds` | Battery voltage/SOC/temperature alert levels |
+| `waterflow.flow` | Flow sensor calibration, min threshold, leak detection |
+| `waterflow.temperature` | Temperature alert thresholds (°C) |
+| `waterflow.battery_load_shedding` | SOC thresholds for aeration load shedding |
+| `waterflow.aeration` | Aeration on/off cycle timing |
+| `waterflow.gpio` | GPIO pin assignments for relays and flow sensors |
+| `alerts` | Email cooldown period and daily summary hour |
 
 ## DS18B20 Sensor Identification
 
@@ -102,146 +121,130 @@ To map sensor IDs to logical names in `config.json`:
 
 ```bash
 ls /sys/bus/w1/devices/28-*/
-# Place sensors one at a time in known locations and record the ID
+# Place sensors one at a time in known locations to identify each ID
 ```
 
-Update `config.json` under `waterflow.temperature.sensor_map`.
+Update `config.json` under `waterflow.temperature.sensor_map`:
+```json
+"sensor_map": {
+  "28-xxxxxxxxxxxx": "reservoir",
+  "28-xxxxxxxxxxxx": "nft_drain",
+  "28-xxxxxxxxxxxx": "outdoor"
+}
+```
 
 ## Prometheus & Grafana Setup
 
 ### How Metrics Flow
 
-```
-renogy.py          ──┐
-                     ├──▶  /ramdisk/*.prom  ──▶  node_exporter  ──▶  Prometheus  ──▶  Grafana
-waterflow.py       ──┘        (textfiles)         (port 9100)      (Proxmox)
-```
+The Python scripts write Prometheus text-format files to `/ramdisk` (tmpfs — avoids SD card writes). `prometheus-node-exporter` is configured with `--collector.textfile.directory=/ramdisk`, picking up `*.prom` files and exposing them on port 9100 alongside standard system metrics. The local `prometheus` service scrapes port 9100 every 15 seconds and stores the time-series data. Grafana on Proxmox connects directly to the Pi's Prometheus.
 
-The Python scripts write Prometheus-format text files to `/ramdisk` (a tmpfs ramdisk to avoid SD card wear). `prometheus-node-exporter` is configured with `--collector.textfile.directory=/ramdisk`, which picks up these files and exposes them on port 9100 alongside standard system metrics (CPU, memory, disk, network).
+### Grafana Datasource (on Proxmox)
 
-### Prometheus Configuration (on Proxmox)
+Add a new Prometheus datasource in Grafana pointing at the Pi:
 
-Add a scrape job to your Prometheus config (`prometheus.yml`):
+1. In Grafana go to **Connections → Data Sources → Add new**
+2. Choose **Prometheus**
+3. Set the URL to `http://<PI_IP_ADDRESS>:9090`
+4. Click **Save & Test**
 
-```yaml
-scrape_configs:
-  - job_name: 'solar_hydroponic_pi'
-    static_configs:
-      - targets: ['<PI_IP_ADDRESS>:9100']
-    scrape_interval: 15s
-    labels:
-      instance: 'solar_hydroponic_pi'
-```
-
-Replace `<PI_IP_ADDRESS>` with the Pi's static IP or hostname. After editing, reload Prometheus:
-
+Ensure port 9090 is reachable from Proxmox. On the Pi:
 ```bash
-# On Proxmox, typically:
-systemctl reload prometheus
-# or if running in a container:
-curl -X POST http://localhost:9090/-/reload
+sudo ufw allow from <PROXMOX_IP> to any port 9090
+sudo ufw allow from <PROXMOX_IP> to any port 9100
 ```
 
-Verify the Pi is being scraped at `http://<PROXMOX_IP>:9090/targets`.
+Verify Prometheus is scraping correctly:
+```bash
+curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm
+```
 
 ### Grafana Dashboard
 
 A pre-built dashboard is included: `Solar___Hydroponic_NFT_System_-_Complete_Monitoring-updated.json`
 
 **Import steps:**
-
-1. In Grafana, go to **Dashboards → Import**
-2. Click **Upload JSON file** and select the JSON file
-3. Select your Prometheus datasource when prompted
+1. In Grafana go to **Dashboards → Import**
+2. Click **Upload JSON file** and select the file
+3. Select your Pi Prometheus datasource when prompted
 4. Click **Import**
 
 **Dashboard sections:**
 
-- **System Status** — maintenance mode flags, monitor health, last update age
-- **Solar & Battery** — SOC, voltage, charging state, solar power/current, daily generation
-- **Battery Details** — temperature, capacity, over-discharge events, cumulative stats
-- **Water Flow** — inlet/outlet flow rates, smoothed vs raw, imbalance, flow trend analysis, daily volume
-- **Pump Status** — main/backup pump state, recovery status, backup failover
-- **Aeration & Fan** — aeration state/mode, fan state, load shedding
-- **Temperature** — reservoir, NFT drain, outdoor temps (°C and °F), solar heating differential, freeze risk
-- **Enclosure Environment** — BME280 temperature, humidity, dew point, pressure
-- **Active Alerts** — all alert states at a glance
-- **System Health** — Pi CPU, memory, disk, uptime, network, Modbus error rate
-- **Historical** — cumulative solar generation, total operating days, battery cycles
+| Section | Panels |
+|---------|--------|
+| System Status | Maintenance flags, monitor health, last update age |
+| Solar & Battery | SOC, voltage, charging state, solar power/current, daily generation |
+| Battery Details | Temperature, capacity, over-discharge events, cumulative stats |
+| Water Flow | Inlet/outlet flow, smoothed vs raw, imbalance, trend analysis, daily volume |
+| Pump Status | Main/backup pump state, recovery status, backup failover |
+| Aeration & Fan | Aeration state/mode, fan state, load shedding active |
+| Temperature | Reservoir, NFT drain, outdoor (°C and °F), solar heating differential |
+| Enclosure Environment | BME280 temperature, humidity, dew point, pressure |
+| Active Alerts | All alert states at a glance |
+| System Health | Pi CPU, memory, disk, uptime, network, Modbus error rate |
+| Historical | Cumulative solar generation, total operating days, battery cycles |
 
 ### Datasource UID
 
-The dashboard JSON references a Prometheus datasource. If your datasource UID differs from the one in the JSON, update it after import via Grafana UI, or do a find-and-replace in the JSON file before importing:
+The dashboard JSON hardcodes a datasource UID. If yours differs, replace it before importing:
 
 ```bash
-sed -i 's/"uid": "prometheus"/"uid": "YOUR_UID_HERE"/g' Solar___Hydroponic_NFT_System_-_Complete_Monitoring-updated.json
+sed -i 's/"uid": "prometheus"/"uid": "YOUR_UID_HERE"/g' \
+  Solar___Hydroponic_NFT_System_-_Complete_Monitoring-updated.json
 ```
 
-Find your datasource UID in Grafana under **Configuration → Data Sources → (your Prometheus) → URL** — the UID is in the browser URL.
-
-### Port Access
-
-Ensure port 9100 is accessible from Prometheus on Proxmox. On the Pi:
-
-```bash
-# Check node_exporter is listening
-curl http://localhost:9100/metrics | grep waterflow_inlet_lpm
-```
-
-If using a firewall:
-
-```bash
-sudo ufw allow from <PROXMOX_IP> to any port 9100
-```
+Find your UID in Grafana under **Connections → Data Sources → (your datasource)** — it appears in the browser URL.
 
 ## Service Management
 
 ```bash
 # Status
-sudo systemctl status renogy waterflow prometheus-node-exporter
+sudo systemctl status renogy waterflow prometheus prometheus-node-exporter
 
-# Logs (live)
+# Live logs
 sudo journalctl -u renogy -f
 sudo journalctl -u waterflow -f
 
 # Restart
 sudo systemctl restart renogy waterflow
 
-# Maintenance mode (edit config.json then SIGHUP)
+# Reload config without restart
 sudo kill -HUP $(systemctl show -p MainPID --value renogy)
 sudo kill -HUP $(systemctl show -p MainPID --value waterflow)
+
+# Update credentials
+sudo nano /etc/solar-hydroponic/credentials.env
+sudo systemctl restart renogy waterflow
 ```
 
 ## Maintenance Mode
 
-Edit `config.json` to set disable flags, then send SIGHUP:
+Disable specific subsystems by editing `config.json` and sending SIGHUP. The disable flags are in each script's top-level config section and are reflected as Prometheus metrics so you can see maintenance mode status in Grafana.
 
-```json
-"maintenance": {
-  "disable_emails": false,
-  "disable_low_battery_alerts": false,
-  "disable_fault_alerts": false,
-  "disable_temperature_alerts": false,
-  "disable_capacity_alerts": false,
-  "disable_pump_testing": false,
-  "disable_flow_alerts": false,
-  "disable_aerator": false,
-  "disable_fan": false
-}
-```
+Common scenarios:
+
+| Scenario | Flags to set |
+|----------|-------------|
+| Reservoir empty / refilling | `disable_flow_alerts`, `disable_pump_testing` |
+| Aerator servicing | `disable_aerator` |
+| Fan servicing | `disable_fan` |
+| Battery maintenance | `disable_low_battery_alerts`, `disable_capacity_alerts` |
+| Testing (no emails) | `disable_emails` |
 
 ## File Structure
 
 ```
 solar-hydroponic-monitor/
-├── install.sh                    # One-command installer
+├── install.sh                    # One-command installer (11 steps)
 ├── config.json                   # All configuration (edit this, not the scripts)
-├── credentials.py.example        # Email credentials template
-├── credentials.py                # Your credentials (not in git)
+├── credentials.env.example       # Email credentials template
 ├── monitor_common.py             # Shared: AlertManager, email, watchdog, config
 ├── renogy.py                     # Renogy charge controller monitor
 ├── renogy_extended.py            # Renogy Modbus driver with batch reads
 ├── waterflow_enhanced_failsafe.py # Hydroponic system controller
+├── prometheus/
+│   └── prometheus.yml            # Prometheus scrape config (installed to /etc/prometheus/)
 ├── systemd/
 │   ├── renogy.service
 │   └── waterflow.service
@@ -249,4 +252,9 @@ solar-hydroponic-monitor/
 │   ├── renogy
 │   └── waterflow
 └── Solar___Hydroponic_NFT_System_-_Complete_Monitoring-updated.json
+
+# Created by install.sh (not in repo):
+/etc/solar-hydroponic/credentials.env   # Email credentials (root:serviceuser, mode 640)
+/var/lib/renogy/                         # Persistent alert state across reboots
+/ramdisk/                                # tmpfs for *.prom metric files
 ```
