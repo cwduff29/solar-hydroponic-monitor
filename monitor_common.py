@@ -493,3 +493,430 @@ class DailySummary:
         """Return list of tracked stat keys."""
         with self._lock:
             return list(self._stats.keys())
+
+
+# ============================================================================
+# CONFIG VALIDATION
+# ============================================================================
+
+_REQUIRED_TOP_LEVEL_KEYS = ['renogy', 'waterflow', 'alerts', 'paths', 'watchdog', 'shutdown']
+
+
+def get_missing_keys():
+    """
+    Check for required top-level config keys.
+
+    Returns a list of missing key names.
+    """
+    with _config_lock:
+        return [k for k in _REQUIRED_TOP_LEVEL_KEYS if k not in _config]
+
+
+def validate_config():
+    """
+    Validate the loaded configuration for logical consistency and safety.
+
+    Returns:
+        True if no ERRORs were found, False if any ERRORs were found.
+
+    Side effects:
+        Logs each issue at the appropriate level (ERROR / WARNING / INFO).
+    """
+    issues = []  # list of (level, message)
+
+    def _get(key, default=None):
+        return get_config(key, default)
+
+    # -----------------------------------------------------------------------
+    # Missing top-level keys
+    # -----------------------------------------------------------------------
+    for key in _REQUIRED_TOP_LEVEL_KEYS:
+        if get_config(key) is None:
+            issues.append(('WARNING', f"Missing top-level config key: '{key}'"))
+
+    # -----------------------------------------------------------------------
+    # Battery load shedding SOC thresholds
+    # -----------------------------------------------------------------------
+    low_soc    = _get('waterflow.battery_load_shedding.disable_threshold_pct',  30)
+    reduce_soc = _get('waterflow.battery_load_shedding.reduce_threshold_pct',   50)
+    normal_soc = _get('waterflow.battery_load_shedding.normal_threshold_pct',   70)
+
+    if not (0 <= low_soc <= 100):
+        issues.append(('ERROR',
+            f"waterflow.battery_load_shedding.disable_threshold_pct={low_soc} "
+            f"out of range [0, 100]"))
+    if not (0 <= reduce_soc <= 100):
+        issues.append(('ERROR',
+            f"waterflow.battery_load_shedding.reduce_threshold_pct={reduce_soc} "
+            f"out of range [0, 100]"))
+    if not (0 <= normal_soc <= 100):
+        issues.append(('ERROR',
+            f"waterflow.battery_load_shedding.normal_threshold_pct={normal_soc} "
+            f"out of range [0, 100]"))
+    if low_soc >= normal_soc:
+        issues.append(('ERROR',
+            f"Battery load shedding: disable_threshold_pct ({low_soc}) "
+            f"must be < normal_threshold_pct ({normal_soc})"))
+    if not (low_soc <= reduce_soc <= normal_soc):
+        issues.append(('ERROR',
+            f"Battery load shedding thresholds must satisfy "
+            f"disable ({low_soc}) <= reduce ({reduce_soc}) <= normal ({normal_soc})"))
+
+    # -----------------------------------------------------------------------
+    # Voltage thresholds
+    # -----------------------------------------------------------------------
+    for key in [
+        'renogy.thresholds.low_battery_voltage',
+        'renogy.thresholds.max_voltage',
+        'renogy.thresholds.min_voltage',
+    ]:
+        v = _get(key)
+        if v is not None and not (8.0 <= v <= 20.0):
+            issues.append(('WARNING',
+                f"{key}={v} outside reasonable range [8.0, 20.0]V"))
+
+    # -----------------------------------------------------------------------
+    # Temperature thresholds (-50 to 100°C)
+    # -----------------------------------------------------------------------
+    temp_keys = [
+        'renogy.thresholds.high_controller_temp_c',
+        'renogy.thresholds.high_battery_temp_c',
+        'renogy.thresholds.low_battery_temp_c',
+        'renogy.thresholds.max_temp_c',
+        'renogy.thresholds.min_temp_c',
+        'waterflow.temperature.nft_extreme_temp_c',
+        'waterflow.temperature.outdoor_freeze_risk_c',
+        'waterflow.temperature.reservoir_min_for_freeze_alert_c',
+        'waterflow.temperature.water_temp_hot_c',
+        'waterflow.temperature.water_temp_warm_c',
+        'waterflow.temperature.water_temp_moderate_c',
+        'waterflow.fan.temp_on_c',
+        'waterflow.fan.temp_off_c',
+        'waterflow.fan.temp_force_on_c',
+    ]
+    for key in temp_keys:
+        v = _get(key)
+        if v is not None and not (-50.0 <= v <= 100.0):
+            issues.append(('WARNING',
+                f"{key}={v} outside reasonable range [-50, 100]°C"))
+
+    # -----------------------------------------------------------------------
+    # Flow thresholds must be positive
+    # -----------------------------------------------------------------------
+    flow_pos_keys = [
+        'waterflow.flow.calibration_factor',
+        'waterflow.flow.measurement_duration_seconds',
+        'waterflow.flow.min_flow_threshold_lpm',
+        'waterflow.flow.imbalance_threshold_lpm',
+    ]
+    for key in flow_pos_keys:
+        v = _get(key)
+        if v is not None and v <= 0:
+            issues.append(('ERROR', f"{key}={v} must be positive"))
+
+    # -----------------------------------------------------------------------
+    # GPIO pins: valid BCM numbers (0–27), no duplicates
+    # -----------------------------------------------------------------------
+    gpio_keys = {
+        'flow_sensor_inlet':  'waterflow.gpio.flow_sensor_inlet',
+        'flow_sensor_outlet': 'waterflow.gpio.flow_sensor_outlet',
+        'main_pump_relay':    'waterflow.gpio.main_pump_relay',
+        'backup_pump_relay':  'waterflow.gpio.backup_pump_relay',
+        'aeration_pump':      'waterflow.gpio.aeration_pump',
+        'fan_control':        'waterflow.gpio.fan_control',
+    }
+    gpio_values = {}
+    for name, key in gpio_keys.items():
+        v = _get(key)
+        if v is not None:
+            if not (0 <= int(v) <= 27):
+                issues.append(('ERROR',
+                    f"GPIO pin {key}={v} out of valid BCM range [0, 27]"))
+            else:
+                if v in gpio_values:
+                    issues.append(('ERROR',
+                        f"Duplicate GPIO pin {v} assigned to both "
+                        f"'{gpio_values[v]}' and '{name}'"))
+                else:
+                    gpio_values[v] = name
+
+    # -----------------------------------------------------------------------
+    # Aeration durations must be positive
+    # -----------------------------------------------------------------------
+    for key in [
+        'waterflow.aeration.on_duration_seconds',
+        'waterflow.aeration.off_duration_seconds',
+        'waterflow.aeration.reduced_on_duration_seconds',
+        'waterflow.aeration.reduced_off_duration_seconds',
+    ]:
+        v = _get(key)
+        if v is not None and v <= 0:
+            issues.append(('ERROR', f"{key}={v} must be positive"))
+
+    # -----------------------------------------------------------------------
+    # Alert email cooldown must be positive
+    # -----------------------------------------------------------------------
+    cooldown = _get('alerts.email_cooldown_minutes', 60)
+    if cooldown <= 0:
+        issues.append(('ERROR',
+            f"alerts.email_cooldown_minutes={cooldown} must be > 0"))
+
+    # -----------------------------------------------------------------------
+    # Battery capacity must be positive
+    # -----------------------------------------------------------------------
+    capacity = _get('renogy.battery_capacity_ah')
+    if capacity is not None and capacity <= 0:
+        issues.append(('ERROR',
+            f"renogy.battery_capacity_ah={capacity} must be positive"))
+
+    # -----------------------------------------------------------------------
+    # Poll interval must be positive
+    # -----------------------------------------------------------------------
+    poll = _get('renogy.poll_interval_seconds')
+    if poll is not None and poll <= 0:
+        issues.append(('ERROR',
+            f"renogy.poll_interval_seconds={poll} must be positive"))
+
+    # -----------------------------------------------------------------------
+    # Sensor map: warn if empty
+    # -----------------------------------------------------------------------
+    sensor_map = _get('waterflow.temperature.sensor_map', {})
+    if not sensor_map:
+        issues.append(('WARNING',
+            "waterflow.temperature.sensor_map is empty — "
+            "will fall back to discovery order"))
+
+    # -----------------------------------------------------------------------
+    # Shutdown SOC: critical < recovery, both 0-100
+    # -----------------------------------------------------------------------
+    critical_soc  = _get('shutdown.critical_soc_pct',  5)
+    recovery_soc  = _get('shutdown.recovery_soc_pct', 15)
+    if critical_soc is not None:
+        if not (0 <= critical_soc <= 100):
+            issues.append(('ERROR',
+                f"shutdown.critical_soc_pct={critical_soc} out of range [0, 100]"))
+    if recovery_soc is not None:
+        if not (0 <= recovery_soc <= 100):
+            issues.append(('ERROR',
+                f"shutdown.recovery_soc_pct={recovery_soc} out of range [0, 100]"))
+    if (critical_soc is not None and recovery_soc is not None
+            and critical_soc >= recovery_soc):
+        issues.append(('ERROR',
+            f"shutdown.critical_soc_pct ({critical_soc}) must be < "
+            f"shutdown.recovery_soc_pct ({recovery_soc})"))
+
+    # -----------------------------------------------------------------------
+    # Log and return result
+    # -----------------------------------------------------------------------
+    has_errors = False
+    for level, message in issues:
+        if level == 'ERROR':
+            logging.error(f"Config validation ERROR: {message}")
+            has_errors = True
+        elif level == 'WARNING':
+            logging.warning(f"Config validation WARNING: {message}")
+        else:
+            logging.info(f"Config validation INFO: {message}")
+
+    if not issues:
+        logging.info("Config validation passed — no issues found")
+
+    return not has_errors
+
+
+# ============================================================================
+# STARTUP SELF-TEST
+# ============================================================================
+
+def startup_selftest(script_name, config_path, log_path, extra_checks=None):
+    """
+    Run startup self-test checks and send a notification email with results.
+
+    Args:
+        script_name:   Name of the calling script (e.g. "renogy", "waterflow")
+        config_path:   Path to config.json
+        log_path:      Path to the script's log file
+        extra_checks:  Optional list of (check_name, callable) where callable
+                       returns (status, detail) with status "PASS"/"WARN"/"FAIL"
+
+    Returns:
+        (passed: bool, results: list of (check_name, status, detail))
+    """
+    results = []
+
+    def record(name, status, detail=""):
+        results.append((name, status, detail))
+        if status == 'PASS':
+            logging.info(f"Startup self-test [{name}]: PASS — {detail}")
+        elif status == 'WARN':
+            logging.warning(f"Startup self-test [{name}]: WARN — {detail}")
+        else:
+            logging.error(f"Startup self-test [{name}]: FAIL — {detail}")
+
+    # -----------------------------------------------------------------------
+    # 1. Config file readable and valid JSON
+    # -----------------------------------------------------------------------
+    try:
+        with open(config_path, 'r') as f:
+            json.load(f)
+        record("Config file", "PASS", config_path)
+    except FileNotFoundError:
+        record("Config file", "FAIL", f"not found: {config_path}")
+    except json.JSONDecodeError as e:
+        record("Config file", "FAIL", f"invalid JSON: {e}")
+    except Exception as e:
+        record("Config file", "FAIL", str(e))
+
+    # -----------------------------------------------------------------------
+    # 2. Config validation
+    # -----------------------------------------------------------------------
+    missing = get_missing_keys()
+    if missing:
+        record("Config keys", "WARN",
+               f"missing top-level keys: {', '.join(missing)}")
+    else:
+        record("Config keys", "PASS", "all required keys present")
+
+    valid = validate_config()
+    if valid:
+        record("Config validation", "PASS", "no errors")
+    else:
+        record("Config validation", "FAIL", "one or more config ERRORs (see log)")
+
+    # -----------------------------------------------------------------------
+    # 3. Credentials (SMTP env vars)
+    # -----------------------------------------------------------------------
+    smtp_user = os.environ.get('SMTP_USER', '')
+    smtp_pass = os.environ.get('SMTP_PASSWORD', '')
+    if smtp_user and smtp_pass:
+        record("Credentials", "PASS", f"SMTP_USER={smtp_user}")
+    elif smtp_user and not smtp_pass:
+        record("Credentials", "WARN", "SMTP_USER set but SMTP_PASSWORD is empty")
+    else:
+        record("Credentials", "WARN",
+               "SMTP_USER and SMTP_PASSWORD not set — email alerts disabled")
+
+    # -----------------------------------------------------------------------
+    # 4. Ramdisk mounted
+    # -----------------------------------------------------------------------
+    if os.path.ismount('/ramdisk'):
+        record("Ramdisk", "PASS", "/ramdisk is mounted")
+    else:
+        record("Ramdisk", "FAIL", "/ramdisk is not mounted")
+
+    # -----------------------------------------------------------------------
+    # 5. Persistent state directory
+    # -----------------------------------------------------------------------
+    state_dir = '/var/lib/renogy'
+    if os.path.isdir(state_dir) and os.access(state_dir, os.W_OK):
+        record("Persistent state dir", "PASS", state_dir)
+    elif os.path.isdir(state_dir):
+        record("Persistent state dir", "WARN", f"{state_dir} exists but not writable")
+    else:
+        record("Persistent state dir", "FAIL", f"{state_dir} does not exist")
+
+    # -----------------------------------------------------------------------
+    # 6. Log file writable
+    # -----------------------------------------------------------------------
+    try:
+        log_dir = os.path.dirname(log_path)
+        if log_dir and not os.path.isdir(log_dir):
+            record("Log file", "FAIL", f"parent directory missing: {log_dir}")
+        elif os.path.exists(log_path) and not os.access(log_path, os.W_OK):
+            record("Log file", "WARN", f"not writable: {log_path}")
+        else:
+            record("Log file", "PASS", log_path)
+    except Exception as e:
+        record("Log file", "WARN", str(e))
+
+    # -----------------------------------------------------------------------
+    # 7. Disk space (root filesystem)
+    # -----------------------------------------------------------------------
+    try:
+        st = os.statvfs('/')
+        total = st.f_blocks * st.f_frsize
+        avail = st.f_bavail * st.f_frsize
+        free_pct = (avail / total * 100.0) if total > 0 else 0
+        avail_gb = avail / 1024 ** 3
+        if free_pct < 5:
+            record("Disk space", "FAIL",
+                   f"root fs only {free_pct:.1f}% free ({avail_gb:.2f} GB)")
+        elif free_pct < 20:
+            record("Disk space", "WARN",
+                   f"root fs {free_pct:.1f}% free ({avail_gb:.2f} GB) — consider cleanup")
+        else:
+            record("Disk space", "PASS",
+                   f"root fs {free_pct:.1f}% free ({avail_gb:.2f} GB)")
+    except Exception as e:
+        record("Disk space", "WARN", f"could not check disk space: {e}")
+
+    # -----------------------------------------------------------------------
+    # 8. Previous alert state (from AlertManager if available)
+    # -----------------------------------------------------------------------
+    # We check the global module-level _config for alert state paths, but
+    # we don't have a reference to the script's AlertManager here. Instead,
+    # we try to read the persistent state file and count active alerts.
+    persistent_state = get_config('paths.renogy_persistent_state')
+    if 'waterflow' in script_name.lower():
+        persistent_state = get_config('paths.waterflow_persistent_state',
+                                      persistent_state)
+    if persistent_state and os.path.exists(persistent_state):
+        try:
+            with open(persistent_state, 'r') as f:
+                state_data = json.load(f)
+            active = [k for k, v in state_data.items() if v.get('active', False)]
+            if active:
+                record("Previous alerts", "WARN",
+                       f"Restored {len(active)} active alert(s) from previous session: "
+                       f"{', '.join(active)}")
+            else:
+                record("Previous alerts", "PASS", "no active alerts from previous session")
+        except Exception as e:
+            record("Previous alerts", "WARN", f"could not read previous state: {e}")
+    else:
+        record("Previous alerts", "INFO", "no persistent state file found (first run)")
+
+    # -----------------------------------------------------------------------
+    # 9. Script-specific checks
+    # -----------------------------------------------------------------------
+    if extra_checks:
+        for check_name, check_fn in extra_checks:
+            try:
+                status, detail = check_fn()
+                record(check_name, status, detail)
+            except Exception as e:
+                record(check_name, "FAIL", f"check raised exception: {e}")
+
+    # -----------------------------------------------------------------------
+    # Build and send startup email
+    # -----------------------------------------------------------------------
+    n_pass  = sum(1 for _, s, _ in results if s == 'PASS')
+    n_warn  = sum(1 for _, s, _ in results if s == 'WARN')
+    n_fail  = sum(1 for _, s, _ in results if s == 'FAIL')
+
+    if n_fail > 0:
+        subject = f"System DEGRADED: {script_name} — {n_fail} failure(s)"
+    elif n_warn > 0:
+        subject = f"System Online: {script_name} ⚠ {n_warn} warning(s)"
+    else:
+        subject = f"System Online: {script_name}"
+
+    lines = [
+        f"Startup self-test for {script_name}",
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Host: {os.uname().nodename}",
+        f"",
+        f"Results: {n_pass} PASS  {n_warn} WARN  {n_fail} FAIL",
+        f"",
+    ]
+    for name, status, detail in results:
+        line = f"  [{status:<4}] {name}"
+        if detail:
+            line += f" — {detail}"
+        lines.append(line)
+
+    body = "\n".join(lines)
+    send_email(subject, body)
+
+    passed = (n_fail == 0)
+    return passed, results
