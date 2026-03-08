@@ -1,0 +1,17 @@
+[Unit]
+Description=Hydroponic Water Flow and Equipment Monitor
+After=local-fs.target network.target renogy.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=/usr/bin/python3 __DIR__/waterflow_enhanced_failsafe.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

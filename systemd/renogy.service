@@ -1,0 +1,17 @@
+[Unit]
+Description=Renogy Solar Charge Controller Monitor
+After=local-fs.target network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=/usr/bin/python3 __DIR__/renogy.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
