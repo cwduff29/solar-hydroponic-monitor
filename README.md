@@ -35,7 +35,7 @@ A Raspberry Pi-based monitoring and control system for a solar-powered NFT (Nutr
 
 ```
 renogy.py          ──┐
-                     ├──▶  /ramdisk/*.prom  ──▶  node_exporter :9100  ──▶  Prometheus :9090  ──▶  Grafana (Proxmox)
+                     ├──▶  /ramdisk/*.prom  ──▶  node_exporter :9100  ──▶  Prometheus :9090  ──▶  Grafana
 waterflow.py       ──┘        (tmpfs)
 ```
 
@@ -137,9 +137,9 @@ Update `config.json` under `waterflow.temperature.sensor_map`:
 
 ### How Metrics Flow
 
-The Python scripts write Prometheus text-format files to `/ramdisk` (tmpfs — avoids SD card writes). `prometheus-node-exporter` is configured with `--collector.textfile.directory=/ramdisk`, picking up `*.prom` files and exposing them on port 9100 alongside standard system metrics. The local `prometheus` service scrapes port 9100 every 15 seconds and stores the time-series data. Grafana on Proxmox connects directly to the Pi's Prometheus.
+The Python scripts write Prometheus text-format files to `/ramdisk` (tmpfs — avoids SD card writes). `prometheus-node-exporter` picks up `*.prom` files and exposes them on port 9100 alongside standard system metrics. The local `prometheus` service scrapes port 9100 every 15 seconds and stores the time-series data. Any Grafana instance on your network can use the Pi's Prometheus as a datasource.
 
-### Grafana Datasource (on Proxmox)
+### Grafana Datasource
 
 Add a new Prometheus datasource in Grafana pointing at the Pi:
 
@@ -148,16 +148,33 @@ Add a new Prometheus datasource in Grafana pointing at the Pi:
 3. Set the URL to `http://<PI_IP_ADDRESS>:9090`
 4. Click **Save & Test**
 
-Ensure port 9090 is reachable from Proxmox. On the Pi:
+Ensure port 9090 is reachable from the machine running Grafana. On the Pi:
 ```bash
-sudo ufw allow from <PROXMOX_IP> to any port 9090
-sudo ufw allow from <PROXMOX_IP> to any port 9100
+# Allow a specific host
+sudo ufw allow from <GRAFANA_HOST_IP> to any port 9090
+
+# Or allow your whole local subnet (e.g. 192.168.1.0/24)
+sudo ufw allow from 192.168.1.0/24 to any port 9090
 ```
 
-Verify Prometheus is scraping correctly:
+Verify Prometheus is scraping correctly from the Pi itself:
 ```bash
-curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm
+curl 'http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm'
 ```
+
+### Running Prometheus Elsewhere (Optional)
+
+If you already have a Prometheus instance running on another host and prefer to scrape the Pi from there, you can skip running Prometheus on the Pi and add a scrape job to your existing config instead:
+
+```yaml
+scrape_configs:
+  - job_name: 'solar_hydroponic'
+    static_configs:
+      - targets: ['<PI_IP_ADDRESS>:9100']
+    scrape_interval: 15s
+```
+
+Then point your Grafana datasource at your existing Prometheus rather than the Pi.
 
 ### Grafana Dashboard
 
