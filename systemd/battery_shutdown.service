@@ -1,0 +1,17 @@
+[Unit]
+Description=Battery Critical Shutdown Monitor
+After=local-fs.target renogy.service
+Wants=renogy.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/solar-hydroponic/credentials.env
+ExecStart=/usr/bin/python3 __DIR__/battery_shutdown.py __DIR__/config.json
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

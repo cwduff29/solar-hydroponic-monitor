@@ -47,6 +47,8 @@ from monitor_common import (
     load_config,
     get_config,
     reload_config,
+    validate_config,
+    startup_selftest,
 )
 
 # ============================================================================
@@ -55,6 +57,7 @@ from monitor_common import (
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.json')
 load_config(_CONFIG_PATH)
+validate_config()
 
 # ============================================================================
 # MAINTENANCE CONTROLS - INDIVIDUAL SUBSYSTEM DISABLE FLAGS
@@ -1880,32 +1883,57 @@ def write_unhealthy_status():
 # ============================================================================
 
 def send_startup_notification():
-    """Send email on startup with system info and previously active alerts."""
+    """Run startup self-test and send a startup notification email."""
     try:
-        active_alerts = [
-            atype for atype, s in alert_manager.all_states().items()
-            if s.get('active', False)
+        def check_gpio():
+            try:
+                import RPi.GPIO as _GPIO
+                return ("PASS", "RPi.GPIO imported successfully")
+            except ImportError as e:
+                return ("FAIL", f"RPi.GPIO import failed: {e}")
+
+        def check_ds18b20():
+            count = len(_ds18b20_sensor_cache)
+            if count > 0:
+                return ("PASS", f"{count} sensor(s) found in cache")
+            import glob as _glob
+            found = _glob.glob('/sys/bus/w1/devices/28-*')
+            if found:
+                return ("WARN", f"{len(found)} sensor(s) found on bus but cache empty")
+            return ("FAIL", "no DS18B20 sensors found in /sys/bus/w1/devices/28-*")
+
+        def check_bme280():
+            try:
+                import smbus2 as _smbus2
+                import bme280 as _bme280
+                bus = _smbus2.SMBus(1)
+                cal = _bme280.load_calibration_params(bus, BME280_I2C_ADDRESS)
+                data = _bme280.sample(bus, BME280_I2C_ADDRESS, cal)
+                bus.close()
+                return ("PASS", f"temp={data.temperature:.1f}°C humidity={data.humidity:.1f}%")
+            except Exception as e:
+                return ("WARN", f"BME280 read failed: {e}")
+
+        def check_renogy_prom():
+            prom = BATTERY_DATA_FILE
+            if os.path.exists(prom):
+                import time as _time
+                age = _time.time() - os.path.getmtime(prom)
+                if age < BATTERY_DATA_TIMEOUT:
+                    return ("PASS", f"{prom} exists and is fresh ({age:.0f}s old)")
+                else:
+                    return ("WARN",
+                            f"{prom} exists but is stale ({age:.0f}s old, "
+                            f"timeout={BATTERY_DATA_TIMEOUT}s)")
+            return ("WARN", f"{prom} not found — is renogy.py running?")
+
+        extra_checks = [
+            ("GPIO",              check_gpio),
+            ("1-Wire sensors",    check_ds18b20),
+            ("I2C/BME280",        check_bme280),
+            ("Ramdisk Renogy data", check_renogy_prom),
         ]
-
-        alert_section = (
-            "\nPreviously active alerts loaded from state:\n" +
-            "\n".join(f"  - {a}" for a in active_alerts) + "\n"
-        ) if active_alerts else "\nNo previously active alerts.\n"
-
-        body = (
-            f"Waterflow Monitor has started.\n\n"
-            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Host: {os.uname().nodename}\n"
-            f"Prometheus: {PROM_OUTPUT_FILE}\n"
-            f"{alert_section}"
-            f"\nMaintenance flags:\n"
-            f"  DISABLE_EMAILS={DISABLE_EMAILS}\n"
-            f"  DISABLE_PUMP_TESTING={DISABLE_PUMP_TESTING}\n"
-            f"  DISABLE_FLOW_ALERTS={DISABLE_FLOW_ALERTS}\n"
-            f"  DISABLE_AERATOR={DISABLE_AERATOR}\n"
-            f"  DISABLE_FAN={DISABLE_FAN}\n"
-        )
-        send_email_alert("System Online: Waterflow Monitor Started", body)
+        startup_selftest("waterflow", _CONFIG_PATH, LOG_FILE_PATH, extra_checks)
     except Exception as e:
         logging.warning(f"Failed to send startup notification: {e}")
 

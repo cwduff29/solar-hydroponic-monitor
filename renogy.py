@@ -39,6 +39,8 @@ from monitor_common import (
     load_config,
     get_config,
     reload_config,
+    validate_config,
+    startup_selftest,
 )
 
 # ============================================================================
@@ -47,6 +49,7 @@ from monitor_common import (
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.json')
 load_config(_CONFIG_PATH)
+validate_config()
 
 # ============================================================================
 # MAINTENANCE CONTROLS - INDIVIDUAL SUBSYSTEM DISABLE FLAGS
@@ -276,39 +279,27 @@ def send_email_alert(subject, content):
 # ============================================================================
 
 def send_startup_notification():
-    """Send an email on startup with system info and any previously active alerts."""
+    """Run startup self-test and send a startup notification email."""
     try:
-        active_alerts = [
-            atype for atype, s in alert_manager.all_states().items()
-            if s.get('active', False)
+        extra_checks = [
+            (
+                "Serial port",
+                lambda: (
+                    ("PASS", f"{DEV_NAME} exists")
+                    if os.path.exists(DEV_NAME)
+                    else ("FAIL", f"{DEV_NAME} not found")
+                ),
+            ),
+            (
+                "Renogy connection",
+                lambda: (
+                    ("PASS", "rover initialized successfully")
+                    if rover is not None
+                    else ("FAIL", "rover object is None")
+                ),
+            ),
         ]
-
-        alert_section = ""
-        if active_alerts:
-            alert_section = (
-                "\nPreviously active alerts loaded from state:\n" +
-                "\n".join(f"  - {a}" for a in active_alerts) +
-                "\n"
-            )
-        else:
-            alert_section = "\nNo previously active alerts.\n"
-
-        body = (
-            f"Renogy Monitor has started.\n\n"
-            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Host: {os.uname().nodename}\n"
-            f"Serial port: {DEV_NAME}\n"
-            f"Poll interval: {SLEEP_TIME}s\n"
-            f"Battery: {BATTERY_CAPACITY_AH}Ah @ {BATTERY_NOMINAL_VOLTAGE}V\n"
-            f"{alert_section}"
-            f"\nMaintenance flags:\n"
-            f"  DISABLE_EMAILS={DISABLE_EMAILS}\n"
-            f"  DISABLE_LOW_BATTERY_ALERTS={DISABLE_LOW_BATTERY_ALERTS}\n"
-            f"  DISABLE_FAULT_ALERTS={DISABLE_FAULT_ALERTS}\n"
-            f"  DISABLE_TEMPERATURE_ALERTS={DISABLE_TEMPERATURE_ALERTS}\n"
-            f"  DISABLE_CAPACITY_ALERTS={DISABLE_CAPACITY_ALERTS}\n"
-        )
-        send_email_alert("System Online: Renogy Monitor Started", body)
+        startup_selftest("renogy", _CONFIG_PATH, LOG_FILE_PATH, extra_checks)
     except Exception as e:
         logging.warning(f"Failed to send startup notification: {e}")
 
@@ -821,6 +812,125 @@ def check_critical_conditions(metrics):
     return active_alerts
 
 # ============================================================================
+# SD CARD HEALTH METRICS
+# ============================================================================
+
+# Rolling write-rate state (module-level)
+_sd_prev_write_sectors = None
+_sd_prev_timestamp = None
+
+
+def get_sd_card_metrics():
+    """
+    Read /proc/diskstats for the root SD card device (mmcblk0).
+    Returns dict with write_sectors, write_ios, or None on failure.
+    """
+    try:
+        with open('/proc/diskstats') as f:
+            for line in f:
+                parts = line.split()
+                # mmcblk0 is the Pi SD card (not mmcblk0p1 partition)
+                if len(parts) >= 10 and parts[2] == 'mmcblk0':
+                    return {
+                        'write_ios': int(parts[7]),      # writes completed
+                        'write_sectors': int(parts[9]),  # sectors written
+                    }
+    except Exception:
+        pass
+    return None
+
+
+def get_sd_card_prometheus_metrics():
+    """
+    Collect SD card I/O and disk space metrics.
+
+    Returns dict of metric_name → value (floats), or empty dict on failure.
+    """
+    global _sd_prev_write_sectors, _sd_prev_timestamp
+
+    out = {}
+    now = time.time()
+
+    # --- Disk I/O from /proc/diskstats ---
+    sd = get_sd_card_metrics()
+    if sd is not None:
+        write_sectors = sd['write_sectors']
+        write_ios     = sd['write_ios']
+
+        out['sd_card_writes_total_sectors'] = write_sectors
+
+        if _sd_prev_write_sectors is not None and _sd_prev_timestamp is not None:
+            elapsed = now - _sd_prev_timestamp
+            if elapsed > 0:
+                sector_delta = write_sectors - _sd_prev_write_sectors
+                # 1 sector = 512 bytes; convert to kbps
+                kbps = (sector_delta * 512) / elapsed / 1024.0
+                out['sd_card_write_rate_kbps'] = max(0.0, kbps)
+
+        _sd_prev_write_sectors = write_sectors
+        _sd_prev_timestamp = now
+
+    # --- Disk space from os.statvfs ---
+    try:
+        st = os.statvfs('/')
+        total_bytes = st.f_blocks * st.f_frsize
+        avail_bytes = st.f_bavail * st.f_frsize
+        used_bytes  = total_bytes - avail_bytes
+        if total_bytes > 0:
+            used_pct    = used_bytes / total_bytes * 100.0
+            avail_gb    = avail_bytes / 1024 ** 3
+            out['sd_card_available_gb'] = round(avail_gb, 3)
+            out['sd_card_used_pct']     = round(used_pct, 2)
+    except Exception as e:
+        logging.warning(f"Could not read disk space via statvfs: {e}")
+
+    return out
+
+
+def check_disk_space_alert(sd_metrics, active_alerts):
+    """
+    Alert if SD card used % exceeds threshold from config.
+
+    Mutates active_alerts list in place.
+    """
+    used_pct = sd_metrics.get('sd_card_used_pct')
+    if used_pct is None:
+        return
+
+    disk_alert_threshold = get_config('system.disk_alert_pct', 85)
+
+    if used_pct > disk_alert_threshold:
+        alert_type = 'high_disk_usage'
+        should_send, reason = alert_manager.should_send(alert_type)
+        if should_send:
+            avail_gb = sd_metrics.get('sd_card_available_gb', 0)
+            subject = f"Warning: High SD Card Usage ({used_pct:.1f}%)"
+            content = (
+                f"SD card (root filesystem) usage is high: {used_pct:.1f}%\n"
+                f"Threshold: {disk_alert_threshold}%\n"
+                f"Available space: {avail_gb:.2f} GB\n"
+                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"Alert reason: {reason}\n"
+                f"Consider running:\n"
+                f"  sudo journalctl --vacuum-size=100M\n"
+                f"  sudo apt-get autoremove\n"
+                f"  du -sh /var/log/*"
+            )
+            if send_email_alert(subject, content):
+                alert_manager.mark_sent(alert_type)
+                logging.warning(f"High disk usage alert sent: {used_pct:.1f}%")
+        active_alerts.append(alert_type)
+    else:
+        if alert_manager.clear('high_disk_usage'):
+            avail_gb = sd_metrics.get('sd_card_available_gb', 0)
+            send_email_alert(
+                "SD Card Usage Normal",
+                f"SD card usage has returned to {used_pct:.1f}% "
+                f"({avail_gb:.2f} GB available)"
+            )
+
+
+# ============================================================================
 # PROMETHEUS METRICS
 # ============================================================================
 
@@ -899,6 +1009,14 @@ def write_metrics_to_file(metrics, active_alerts, temp_file_path, final_file_pat
                 f'renogy_capacity_alerts_disabled{{source="renogy"}} '
                 f'{1 if DISABLE_CAPACITY_ALERTS else 0}\n'
             )
+
+            # SD card / disk metrics
+            sd_metrics = get_sd_card_prometheus_metrics()
+            check_disk_space_alert(sd_metrics, active_alerts)
+            for sd_key, sd_val in sd_metrics.items():
+                temp_file.write(f'# HELP {sd_key} SD card metric\n')
+                temp_file.write(f'# TYPE {sd_key} gauge\n')
+                temp_file.write(f'{sd_key}{{source="renogy"}} {sd_val}\n')
 
             # Health metric
             temp_file.write('# HELP renogy_monitor_healthy Monitor health status\n')
