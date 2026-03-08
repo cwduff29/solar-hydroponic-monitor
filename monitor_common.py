@@ -874,7 +874,7 @@ def startup_selftest(script_name, config_path, log_path, extra_checks=None):
         except Exception as e:
             record("Previous alerts", "WARN", f"could not read previous state: {e}")
     else:
-        record("Previous alerts", "INFO", "no persistent state file found (first run)")
+        record("Previous alerts", "PASS", "no persistent state file found (first run)")
 
     # -----------------------------------------------------------------------
     # 9. Script-specific checks

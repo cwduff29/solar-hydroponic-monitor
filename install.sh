@@ -180,8 +180,8 @@ echo "      NOTE: A reboot is required for watchdog changes to take effect."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
-usermod -aG dialout,gpio,i2c "$SERVICE_USER"
-echo "      Added to: dialout (serial), gpio, i2c"
+usermod -aG dialout,gpio,i2c,watchdog "$SERVICE_USER"
+echo "      Added to: dialout (serial), gpio, i2c, watchdog"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
 # --- [8/13] Ramdisk ---
