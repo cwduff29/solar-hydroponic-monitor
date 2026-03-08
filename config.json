@@ -1,0 +1,128 @@
+{
+  "renogy": {
+    "serial_port": "/dev/serial0",
+    "poll_interval_seconds": 10,
+    "battery_capacity_ah": 50,
+    "battery_nominal_voltage": 12.8,
+    "thresholds": {
+      "low_battery_voltage": 12.8,
+      "high_controller_temp_c": 45.0,
+      "high_battery_temp_c": 50.0,
+      "low_battery_temp_c": 0.0,
+      "low_battery_soc_pct": 20.0,
+      "low_battery_capacity_ah": 10.0,
+      "max_voltage": 20.0,
+      "min_voltage": 8.0,
+      "max_temp_c": 80.0,
+      "min_temp_c": -40.0,
+      "max_current_a": 30.0,
+      "max_power_w": 500.0
+    },
+    "connection": {
+      "max_retries": 3,
+      "retry_delay_seconds": 5,
+      "timeout_minutes": 10
+    }
+  },
+  "waterflow": {
+    "gpio": {
+      "flow_sensor_inlet": 17,
+      "flow_sensor_outlet": 27,
+      "main_pump_relay": 22,
+      "backup_pump_relay": 23,
+      "aeration_pump": 24,
+      "fan_control": 25
+    },
+    "relay": {
+      "main_pump_terminal": "NC",
+      "backup_pump_terminal": "NO",
+      "aeration_terminal": "NO",
+      "fan_terminal": "NC",
+      "active_low_board": true
+    },
+    "flow": {
+      "calibration_factor": 7.5,
+      "measurement_duration_seconds": 10,
+      "min_flow_threshold_lpm": 0.25,
+      "warning_delay_seconds": 600,
+      "imbalance_threshold_lpm": 0.5,
+      "imbalance_duration_seconds": 600,
+      "history_size": 5
+    },
+    "temperature": {
+      "sensor_map": {
+        "28-000000b18b1c": "reservoir",
+        "28-000000baada8": "nft_drain",
+        "28-000000b26508": "outdoor"
+      },
+      "nft_extreme_temp_c": 29.4,
+      "enable_nft_extreme_temp_alert": true,
+      "outdoor_cooling_delta_c": 2.8,
+      "outdoor_heat_delta_c": 5.6,
+      "outdoor_freeze_risk_c": 1.7,
+      "reservoir_min_for_freeze_alert_c": 7.2,
+      "water_temp_hot_c": 25.6,
+      "water_temp_warm_c": 22.8,
+      "water_temp_moderate_c": 20.0
+    },
+    "bme280": {
+      "i2c_address": 118
+    },
+    "fan": {
+      "temp_on_c": 35.0,
+      "temp_off_c": 29.4,
+      "temp_force_on_c": 43.3,
+      "humidity_on_pct": 80,
+      "humidity_off_pct": 70,
+      "min_toggle_interval_seconds": 120
+    },
+    "humidity_alerts": {
+      "warning_pct": 80,
+      "critical_pct": 85,
+      "emergency_pct": 90
+    },
+    "aeration": {
+      "on_duration_seconds": 360,
+      "off_duration_seconds": 1440,
+      "reduced_on_duration_seconds": 240,
+      "reduced_off_duration_seconds": 2160
+    },
+    "battery_load_shedding": {
+      "disable_threshold_pct": 30,
+      "reduce_threshold_pct": 50,
+      "normal_threshold_pct": 70,
+      "skip_pump_test_below_pct": 50
+    },
+    "pump": {
+      "test_interval_seconds": 172800,
+      "test_duration_seconds": 60,
+      "cycle_pause_seconds": 5,
+      "recovery_wait_seconds": 90,
+      "cycle_max_attempts": 2
+    }
+  },
+  "alerts": {
+    "email_cooldown_minutes": 60,
+    "email_reminder_hours": 12,
+    "daily_summary_hour": 7
+  },
+  "paths": {
+    "renogy_prom": "/ramdisk/Renogy.prom",
+    "renogy_prom_tmp": "/ramdisk/Renogy.prom.tmp",
+    "waterflow_prom": "/ramdisk/waterflow.prom",
+    "waterflow_prom_tmp": "/ramdisk/waterflow.prom.tmp",
+    "renogy_alert_state": "/ramdisk/renogy_alerts.json",
+    "waterflow_alert_state": "/ramdisk/waterflow_alerts.json",
+    "renogy_persistent_state": "/var/lib/renogy/renogy_state.json",
+    "waterflow_persistent_state": "/var/lib/renogy/waterflow_state.json",
+    "renogy_log": "/var/log/renogy.log",
+    "waterflow_log": "/var/log/waterflow.log",
+    "battery_data_file": "/ramdisk/Renogy.prom",
+    "battery_data_timeout_seconds": 60
+  },
+  "watchdog": {
+    "enabled": true,
+    "device": "/dev/watchdog",
+    "interval_seconds": 30
+  }
+}

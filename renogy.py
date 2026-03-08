@@ -11,24 +11,42 @@ Renogy Solar Charge Controller Monitor - Enhanced Version
 - Email throttling (prevents spam)
 - Alert cooldown periods
 - ERROR-ONLY logging to /ramdisk (no data logging)
-- Alert state tracking
+- Alert state tracking (AlertManager from monitor_common)
 - Prometheus metrics export to /ramdisk
+- Batch Modbus reads (fewer bus transactions)
+- Hardware watchdog keepalive
+- Daily summary email
+- SIGHUP config reload
+- Startup notification email
 """
 
 import time
 import logging
-import smtplib
 import os
 import json
+import signal
 import traceback
 from datetime import datetime, timedelta
-from email.message import EmailMessage
 from renogy_extended import RenogyRoverExtended
 import credentials as cr
 
+# Load shared modules
+from monitor_common import (
+    AlertManager,
+    send_email,
+    Watchdog,
+    DailySummary,
+    load_config,
+    get_config,
+    reload_config,
+)
+
 # ============================================================================
-# CONFIGURATION
+# CONFIG LOADING
 # ============================================================================
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.json')
+load_config(_CONFIG_PATH)
 
 # ============================================================================
 # MAINTENANCE CONTROLS - INDIVIDUAL SUBSYSTEM DISABLE FLAGS
@@ -48,59 +66,56 @@ DISABLE_CAPACITY_ALERTS = False     # True = No battery capacity warnings
 # ============================================================================
 
 # Serial port
-DEV_NAME = '/dev/serial0'
-SLEEP_TIME = 10
+DEV_NAME = get_config('renogy.serial_port', '/dev/serial0')
+SLEEP_TIME = get_config('renogy.poll_interval_seconds', 10)
 
 # Battery Configuration
-BATTERY_CAPACITY_AH = 50  # 1x 50Ah LiFePo4
-BATTERY_NOMINAL_VOLTAGE = 12.8  # 12V system
-
-# Charging state codes (for Prometheus export as numeric values)
-# 0 = deactivated, 1 = activated, 2 = mppt, 3 = equalizing
-# 4 = boost, 5 = floating, 6 = current_limiting, -1 = unknown
+BATTERY_CAPACITY_AH = get_config('renogy.battery_capacity_ah', 50)
+BATTERY_NOMINAL_VOLTAGE = get_config('renogy.battery_nominal_voltage', 12.8)
 
 # File paths (all in ramdisk to minimize SD writes)
-TEMP_FILE_PATH = '/ramdisk/Renogy.prom.tmp'
-FINAL_FILE_PATH = '/ramdisk/Renogy.prom'
-LOG_FILE_PATH = '/var/log/renogy.log'  # Error-only log
-STATE_FILE_PATH = '/ramdisk/renogy_alerts.json'  # Alert state in RAM
+TEMP_FILE_PATH = get_config('paths.renogy_prom_tmp', '/ramdisk/Renogy.prom.tmp')
+FINAL_FILE_PATH = get_config('paths.renogy_prom', '/ramdisk/Renogy.prom')
+LOG_FILE_PATH = get_config('paths.renogy_log', '/var/log/renogy.log')
+STATE_FILE_PATH = get_config('paths.renogy_alert_state', '/ramdisk/renogy_alerts.json')
+PERSISTENT_STATE_FILE = get_config('paths.renogy_persistent_state', '/var/lib/renogy/renogy_state.json')
 
-# Persistent state file (only for critical data, written rarely)
-PERSISTENT_STATE_FILE = '/ramdisk/renogy_state.json'  # Use ramdisk instead of /var/lib (no permission issues)
+# Critical Thresholds (loaded from config, can be reloaded via SIGHUP)
+def _load_thresholds():
+    global LOW_BATTERY_VOLTAGE_THRESHOLD, HIGH_CONTROLLER_TEMPERATURE_THRESHOLD
+    global HIGH_BATTERY_TEMPERATURE_THRESHOLD, LOW_BATTERY_TEMPERATURE_THRESHOLD
+    global LOW_BATTERY_SOC_THRESHOLD, LOW_BATTERY_CAPACITY_AH_THRESHOLD
+    global MAX_REASONABLE_VOLTAGE, MIN_REASONABLE_VOLTAGE
+    global MAX_REASONABLE_TEMPERATURE, MIN_REASONABLE_TEMPERATURE
+    global MAX_REASONABLE_CURRENT, MAX_REASONABLE_POWER
+    global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
 
-# Critical Thresholds
-LOW_BATTERY_VOLTAGE_THRESHOLD = 12.8
-HIGH_CONTROLLER_TEMPERATURE_THRESHOLD = 45.0
-HIGH_BATTERY_TEMPERATURE_THRESHOLD = 50.0
-LOW_BATTERY_TEMPERATURE_THRESHOLD = 0.0
-LOW_BATTERY_SOC_THRESHOLD = 20.0
-LOW_BATTERY_CAPACITY_AH_THRESHOLD = 10.0  # 20% of 50Ah
+    LOW_BATTERY_VOLTAGE_THRESHOLD         = get_config('renogy.thresholds.low_battery_voltage', 12.8)
+    HIGH_CONTROLLER_TEMPERATURE_THRESHOLD = get_config('renogy.thresholds.high_controller_temp_c', 45.0)
+    HIGH_BATTERY_TEMPERATURE_THRESHOLD    = get_config('renogy.thresholds.high_battery_temp_c', 50.0)
+    LOW_BATTERY_TEMPERATURE_THRESHOLD     = get_config('renogy.thresholds.low_battery_temp_c', 0.0)
+    LOW_BATTERY_SOC_THRESHOLD             = get_config('renogy.thresholds.low_battery_soc_pct', 20.0)
+    LOW_BATTERY_CAPACITY_AH_THRESHOLD     = get_config('renogy.thresholds.low_battery_capacity_ah', 10.0)
+    MAX_REASONABLE_VOLTAGE                = get_config('renogy.thresholds.max_voltage', 20.0)
+    MIN_REASONABLE_VOLTAGE                = get_config('renogy.thresholds.min_voltage', 8.0)
+    MAX_REASONABLE_TEMPERATURE            = get_config('renogy.thresholds.max_temp_c', 80.0)
+    MIN_REASONABLE_TEMPERATURE            = get_config('renogy.thresholds.min_temp_c', -40.0)
+    MAX_REASONABLE_CURRENT                = get_config('renogy.thresholds.max_current_a', 30.0)
+    MAX_REASONABLE_POWER                  = get_config('renogy.thresholds.max_power_w', 500.0)
+    EMAIL_COOLDOWN_MINUTES                = get_config('alerts.email_cooldown_minutes', 60)
+    EMAIL_REMINDER_HOURS                  = get_config('alerts.email_reminder_hours', 12)
 
-# Data validation thresholds (sanity checks)
-MAX_REASONABLE_VOLTAGE = 20.0  # Any voltage above this is suspicious
-MIN_REASONABLE_VOLTAGE = 8.0   # Any voltage below this is suspicious
-MAX_REASONABLE_TEMPERATURE = 80.0  # Degrees Celsius
-MIN_REASONABLE_TEMPERATURE = -40.0  # Degrees Celsius
-MAX_REASONABLE_CURRENT = 30.0  # Amps
-MAX_REASONABLE_POWER = 500.0   # Watts
-
-# Email throttling configuration
-EMAIL_COOLDOWN_MINUTES = 60  # Don't send same alert more than once per hour
-EMAIL_REMINDER_HOURS = 12    # Send reminder if problem persists for 12 hours
-
-# Email Configuration
-SMTP_SERVER = cr.server
-SENDER_EMAIL = cr.username
-RECIPIENT_EMAIL = cr.recipients
-EMAIL_PASSWORD = cr.password
-SMTP_PORT = cr.port
+_load_thresholds()
 
 # Connection retry configuration
-MAX_CONNECTION_RETRIES = 3
-RETRY_DELAY_SECONDS = 5
-CONNECTION_TIMEOUT_MINUTES = 10
+MAX_CONNECTION_RETRIES = get_config('renogy.connection.max_retries', 3)
+RETRY_DELAY_SECONDS    = get_config('renogy.connection.retry_delay_seconds', 5)
+CONNECTION_TIMEOUT_MINUTES = get_config('renogy.connection.timeout_minutes', 10)
 
-# Logging configuration - ERROR LEVEL ONLY (no data logging)
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+
 logging.basicConfig(
     level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -111,125 +126,64 @@ logging.basicConfig(
 )
 
 # ============================================================================
-# ALERT STATE MANAGEMENT
+# ALERT STATE MANAGEMENT (uses AlertManager from monitor_common)
 # ============================================================================
 
-alert_state = {
-    'low_battery_voltage': {'last_sent': None, 'first_detected': None, 'active': False},
-    'high_controller_temp': {'last_sent': None, 'first_detected': None, 'active': False},
-    'high_battery_temp': {'last_sent': None, 'first_detected': None, 'active': False},
-    'low_battery_temp': {'last_sent': None, 'first_detected': None, 'active': False},
-    'low_battery_soc': {'last_sent': None, 'first_detected': None, 'active': False},
-    'low_battery_capacity': {'last_sent': None, 'first_detected': None, 'active': False},
-    'hardware_fault': {'last_sent': None, 'first_detected': None, 'active': False},
-    'critical_hardware_fault': {'last_sent': None, 'first_detected': None, 'active': False},
-    'data_quality_issue': {'last_sent': None, 'first_detected': None, 'active': False},
-    'over_discharge_event': {'last_sent': None, 'first_detected': None, 'active': False},
-}
+alert_manager = AlertManager(
+    ramdisk_path=STATE_FILE_PATH,
+    persistent_path=PERSISTENT_STATE_FILE,
+    cooldown_minutes=EMAIL_COOLDOWN_MINUTES,
+    reminder_hours=EMAIL_REMINDER_HOURS,
+)
 
-def load_alert_state():
-    """Load alert state from ramdisk"""
-    global alert_state
-    try:
-        if os.path.exists(STATE_FILE_PATH):
-            with open(STATE_FILE_PATH, 'r') as f:
-                loaded_state = json.load(f)
-                for alert_type in alert_state:
-                    if alert_type in loaded_state:
-                        if loaded_state[alert_type]['last_sent']:
-                            alert_state[alert_type]['last_sent'] = datetime.fromisoformat(
-                                loaded_state[alert_type]['last_sent'])
-                        if loaded_state[alert_type]['first_detected']:
-                            alert_state[alert_type]['first_detected'] = datetime.fromisoformat(
-                                loaded_state[alert_type]['first_detected'])
-                        alert_state[alert_type]['active'] = loaded_state[alert_type]['active']
-    except Exception as e:
-        logging.error(f"Failed to load alert state: {e}")
+# Pre-register known alert types
+_KNOWN_ALERTS = [
+    'low_battery_voltage',
+    'high_controller_temp',
+    'high_battery_temp',
+    'low_battery_temp',
+    'low_battery_soc',
+    'low_battery_capacity',
+    'hardware_fault',
+    'critical_hardware_fault',
+    'data_quality_issue',
+    'over_discharge_event',
+]
 
-def save_alert_state():
-    """Save alert state to ramdisk (and occasionally to persistent storage)"""
-    try:
-        serializable_state = {}
-        for alert_type, state in alert_state.items():
-            serializable_state[alert_type] = {
-                'last_sent': state['last_sent'].isoformat() if state['last_sent'] else None,
-                'first_detected': state['first_detected'].isoformat() if state['first_detected'] else None,
-                'active': state['active']
-            }
-        
-        with open(STATE_FILE_PATH, 'w') as f:
-            json.dump(serializable_state, f)
-        
-        any_active = any(state['active'] for state in alert_state.values())
-        if any_active:
-            write_persistent = True
-            if os.path.exists(PERSISTENT_STATE_FILE):
-                age = time.time() - os.path.getmtime(PERSISTENT_STATE_FILE)
-                if age < 3600:
-                    write_persistent = False
-            
-            if write_persistent:
-                os.makedirs(os.path.dirname(PERSISTENT_STATE_FILE), exist_ok=True)
-                with open(PERSISTENT_STATE_FILE, 'w') as f:
-                    json.dump(serializable_state, f)
-        
-    except Exception as e:
-        logging.error(f"Failed to save alert state: {e}")
+# Legacy compatibility shim: expose alert_state dict-like access for
+# write_metrics_to_file (Prometheus export reads alert_state directly)
+class _AlertStateProxy:
+    """Thin proxy so write_metrics_to_file can iterate alert_state like a dict."""
+    def __init__(self, manager):
+        self._mgr = manager
+    def __iter__(self):
+        return iter(self._mgr.all_states())
+    def __getitem__(self, key):
+        return self._mgr.all_states().get(key, {'active': False})
+    def keys(self):
+        return self._mgr.all_states().keys()
 
-def should_send_alert(alert_type):
-    """Determine if an alert should be sent based on cooldown period
-    
-    Automatically initializes new alert types if not already present.
-    """
-    # Initialize alert type if it doesn't exist (defensive programming)
-    if alert_type not in alert_state:
-        alert_state[alert_type] = {'last_sent': None, 'first_detected': None, 'active': False}
-    
-    state = alert_state[alert_type]
-    now = datetime.now()
-    if not state['active']:
-        state['active'] = True
-        state['first_detected'] = now
-        return (True, "first_occurrence")
-    if not state['last_sent']:
-        return (True, "never_sent")
-    time_since_last = now - state['last_sent']
-    cooldown = timedelta(minutes=EMAIL_COOLDOWN_MINUTES)
-    if time_since_last < cooldown:
-        return (False, f"cooldown ({cooldown.total_seconds() - time_since_last.total_seconds():.0f}s remaining)")
-    time_since_first = now - state['first_detected']
-    reminder_interval = timedelta(hours=EMAIL_REMINDER_HOURS)
-    if time_since_first >= reminder_interval:
-        return (True, f"reminder (problem persisting for {time_since_first.total_seconds()/3600:.1f}h)")
-    return (True, "cooldown_expired")
+alert_state = _AlertStateProxy(alert_manager)
 
-def mark_alert_sent(alert_type):
-    """Mark that an alert was sent
-    
-    Automatically initializes new alert types if not already present.
-    """
-    # Initialize alert type if it doesn't exist (defensive programming)
-    if alert_type not in alert_state:
-        alert_state[alert_type] = {'last_sent': None, 'first_detected': None, 'active': False}
-    
-    alert_state[alert_type]['last_sent'] = datetime.now()
-    save_alert_state()
+# Load saved state
+alert_manager.load()
 
-def clear_alert(alert_type):
-    """Clear an alert when condition resolves
-    
-    Automatically initializes new alert types if not already present.
-    """
-    # Initialize alert type if it doesn't exist (defensive programming)
-    if alert_type not in alert_state:
-        alert_state[alert_type] = {'last_sent': None, 'first_detected': None, 'active': False}
-    
-    if alert_state[alert_type]['active']:
-        alert_state[alert_type]['active'] = False
-        alert_state[alert_type]['first_detected'] = None
-        save_alert_state()
-        return True
-    return False
+# ============================================================================
+# SIGHUP HANDLER - reload config without restart
+# ============================================================================
+
+def _sighup_handler(signum, frame):
+    logging.warning("SIGHUP received: reloading config")
+    if reload_config():
+        _load_thresholds()
+        # Update AlertManager cooldown/reminder from new config
+        alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
+        alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours', 12)
+        logging.warning("Config reloaded and thresholds updated")
+    else:
+        logging.error("Config reload failed")
+
+signal.signal(signal.SIGHUP, _sighup_handler)
 
 # ============================================================================
 # CONNECTION MANAGEMENT
@@ -242,7 +196,7 @@ connection_failures = 0
 def initialize_rover():
     """Initialize Renogy Rover with retry logic"""
     global rover, last_successful_connection, connection_failures
-    
+
     for attempt in range(MAX_CONNECTION_RETRIES):
         try:
             rover = RenogyRoverExtended(DEV_NAME, 1, max_retries=3, retry_delay=1.0)
@@ -253,25 +207,33 @@ def initialize_rover():
         except Exception as e:
             connection_failures += 1
             if attempt < MAX_CONNECTION_RETRIES - 1:
-                logging.warning(f"Failed to connect to Renogy Rover (attempt {attempt+1}/{MAX_CONNECTION_RETRIES}): {e}")
+                logging.warning(
+                    f"Failed to connect to Renogy Rover "
+                    f"(attempt {attempt+1}/{MAX_CONNECTION_RETRIES}): {e}"
+                )
                 time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
             else:
-                logging.critical(f"Failed to initialize Renogy Rover after {MAX_CONNECTION_RETRIES} attempts: {e}")
+                logging.critical(
+                    f"Failed to initialize Renogy Rover after {MAX_CONNECTION_RETRIES} attempts: {e}"
+                )
                 return False
     return False
 
 def check_connection_health():
     """Check if connection needs to be re-established"""
     global last_successful_connection
-    
+
     if last_successful_connection is None:
         return False
-    
+
     time_since_connection = datetime.now() - last_successful_connection
     if time_since_connection > timedelta(minutes=CONNECTION_TIMEOUT_MINUTES):
-        logging.warning(f"No successful reads for {CONNECTION_TIMEOUT_MINUTES} minutes, reinitializing connection")
+        logging.warning(
+            f"No successful reads for {CONNECTION_TIMEOUT_MINUTES} minutes, "
+            f"reinitializing connection"
+        )
         return initialize_rover()
-    
+
     return True
 
 # ============================================================================
@@ -282,33 +244,75 @@ if not initialize_rover():
     logging.critical("Cannot start monitoring without controller connection")
     exit(1)
 
-load_alert_state()
+# ============================================================================
+# HARDWARE WATCHDOG
+# ============================================================================
+
+watchdog = None
+if get_config('watchdog.enabled', True):
+    watchdog = Watchdog(
+        device=get_config('watchdog.device', '/dev/watchdog'),
+        interval=get_config('watchdog.interval_seconds', 30),
+    )
+    watchdog.start()
 
 # ============================================================================
-# EMAIL FUNCTIONS
+# DAILY SUMMARY
+# ============================================================================
+
+daily_summary = DailySummary()
+DAILY_SUMMARY_HOUR = get_config('alerts.daily_summary_hour', 7)
+
+# ============================================================================
+# EMAIL HELPERS
 # ============================================================================
 
 def send_email_alert(subject, content):
-    """Send an email alert"""
-    # Skip emails if disabled
-    if DISABLE_EMAILS:
-        logging.info(f"[EMAILS DISABLED] Email suppressed: '{subject}'")
-        return False
-    
+    """Send an email alert (wraps monitor_common.send_email with disable flag)."""
+    return send_email(subject, content, disabled=DISABLE_EMAILS)
+
+# ============================================================================
+# STARTUP NOTIFICATION (#4)
+# ============================================================================
+
+def send_startup_notification():
+    """Send an email on startup with system info and any previously active alerts."""
     try:
-        msg = EmailMessage()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = RECIPIENT_EMAIL
-        msg['Subject'] = subject
-        msg.set_content(content)
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, EMAIL_PASSWORD)
-            server.send_message(msg)
-        return True
+        active_alerts = [
+            atype for atype, s in alert_manager.all_states().items()
+            if s.get('active', False)
+        ]
+
+        alert_section = ""
+        if active_alerts:
+            alert_section = (
+                "\nPreviously active alerts loaded from state:\n" +
+                "\n".join(f"  - {a}" for a in active_alerts) +
+                "\n"
+            )
+        else:
+            alert_section = "\nNo previously active alerts.\n"
+
+        body = (
+            f"Renogy Monitor has started.\n\n"
+            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Host: {os.uname().nodename}\n"
+            f"Serial port: {DEV_NAME}\n"
+            f"Poll interval: {SLEEP_TIME}s\n"
+            f"Battery: {BATTERY_CAPACITY_AH}Ah @ {BATTERY_NOMINAL_VOLTAGE}V\n"
+            f"{alert_section}"
+            f"\nMaintenance flags:\n"
+            f"  DISABLE_EMAILS={DISABLE_EMAILS}\n"
+            f"  DISABLE_LOW_BATTERY_ALERTS={DISABLE_LOW_BATTERY_ALERTS}\n"
+            f"  DISABLE_FAULT_ALERTS={DISABLE_FAULT_ALERTS}\n"
+            f"  DISABLE_TEMPERATURE_ALERTS={DISABLE_TEMPERATURE_ALERTS}\n"
+            f"  DISABLE_CAPACITY_ALERTS={DISABLE_CAPACITY_ALERTS}\n"
+        )
+        send_email_alert("System Online: Renogy Monitor Started", body)
     except Exception as e:
-        logging.error(f"Failed to send email '{subject}': {e}")
-        return False
+        logging.warning(f"Failed to send startup notification: {e}")
+
+send_startup_notification()
 
 # ============================================================================
 # DATA VALIDATION
@@ -320,41 +324,39 @@ def validate_metrics(metrics):
     Returns (is_valid, list_of_issues)
     """
     issues = []
-    
-    # Voltage checks
+
     if metrics["battery_voltage"] is not None:
-        if metrics["battery_voltage"] > MAX_REASONABLE_VOLTAGE or metrics["battery_voltage"] < MIN_REASONABLE_VOLTAGE:
+        if (metrics["battery_voltage"] > MAX_REASONABLE_VOLTAGE or
+                metrics["battery_voltage"] < MIN_REASONABLE_VOLTAGE):
             issues.append(f"Battery voltage out of range: {metrics['battery_voltage']:.2f}V")
-    
+
     if metrics["solar_input_voltage"] is not None:
         if metrics["solar_input_voltage"] > MAX_REASONABLE_VOLTAGE and metrics["solar_input_voltage"] > 0:
             issues.append(f"Solar voltage out of range: {metrics['solar_input_voltage']:.2f}V")
-    
-    # Temperature checks
+
     if metrics["controller_temperature"] is not None:
-        if metrics["controller_temperature"] > MAX_REASONABLE_TEMPERATURE or metrics["controller_temperature"] < MIN_REASONABLE_TEMPERATURE:
-            issues.append(f"Controller temp out of range: {metrics['controller_temperature']:.1f}°C")
-    
+        if (metrics["controller_temperature"] > MAX_REASONABLE_TEMPERATURE or
+                metrics["controller_temperature"] < MIN_REASONABLE_TEMPERATURE):
+            issues.append(f"Controller temp out of range: {metrics['controller_temperature']:.1f}C")
+
     if metrics["battery_temperature"] is not None:
-        if metrics["battery_temperature"] > MAX_REASONABLE_TEMPERATURE or metrics["battery_temperature"] < MIN_REASONABLE_TEMPERATURE:
-            issues.append(f"Battery temp out of range: {metrics['battery_temperature']:.1f}°C")
-    
-    # Current checks
+        if (metrics["battery_temperature"] > MAX_REASONABLE_TEMPERATURE or
+                metrics["battery_temperature"] < MIN_REASONABLE_TEMPERATURE):
+            issues.append(f"Battery temp out of range: {metrics['battery_temperature']:.1f}C")
+
     if metrics["solar_input_current"] is not None:
         if metrics["solar_input_current"] > MAX_REASONABLE_CURRENT:
             issues.append(f"Solar current out of range: {metrics['solar_input_current']:.2f}A")
-    
-    # Power checks
+
     if metrics["solar_input_power"] is not None:
         if metrics["solar_input_power"] > MAX_REASONABLE_POWER:
             issues.append(f"Solar power out of range: {metrics['solar_input_power']:.0f}W")
-    
-    # Check for None values in critical metrics
+
     critical_metrics = ["battery_voltage", "battery_soc", "controller_temperature"]
     for metric in critical_metrics:
         if metrics.get(metric) is None:
             issues.append(f"Critical metric '{metric}' is None")
-    
+
     return (len(issues) == 0, issues)
 
 # ============================================================================
@@ -365,15 +367,16 @@ def validate_metrics(metrics):
 previous_over_discharge_count = None
 
 def read_rover_metrics():
-    """Read metrics from Renogy Rover with enhanced error handling"""
+    """Read metrics from Renogy Rover with enhanced error handling and batch reads."""
     global last_successful_connection, previous_over_discharge_count
-    
+
     try:
-        # Get active faults and load status first
+        # Batch read all registers in 2-3 Modbus calls (#7)
+        rover.batch_read()
+
         active_faults = rover.get_active_faults() or []
         load_status = rover.get_load_status()
-        
-        # Get current over-discharge count for event detection
+
         current_over_discharge_count = rover.get_total_battery_over_discharges()
         new_over_discharge_event = False
         if previous_over_discharge_count is not None and current_over_discharge_count is not None:
@@ -381,14 +384,13 @@ def read_rover_metrics():
                 new_over_discharge_event = True
         if current_over_discharge_count is not None:
             previous_over_discharge_count = current_over_discharge_count
-        
-        # Calculate battery capacity (SOC is needed first)
+
         battery_soc = rover.get_battery_state_of_charge()
-        battery_capacity_ah_remaining = (battery_soc / 100.0) * BATTERY_CAPACITY_AH if battery_soc is not None else None
-        
-        # Read all metrics in a single dictionary
+        battery_capacity_ah_remaining = (
+            (battery_soc / 100.0) * BATTERY_CAPACITY_AH if battery_soc is not None else None
+        )
+
         metrics = {
-            # Basic metrics
             "battery_soc": battery_soc,
             "battery_voltage": rover.get_battery_voltage(),
             "solar_input_voltage": rover.get_solar_voltage(),
@@ -403,11 +405,7 @@ def read_rover_metrics():
             "minimum_solar_power": rover.get_minimum_solar_power_today(),
             "maximum_battery_voltage": rover.get_maximum_battery_voltage_today(),
             "minimum_battery_voltage": rover.get_minimum_battery_voltage_today(),
-            
-            # Calculated battery capacity
             "battery_capacity_ah_remaining": battery_capacity_ah_remaining,
-            
-            # Extended metrics - Daily statistics
             "daily_min_battery_voltage": rover.get_daily_min_battery_voltage(),
             "daily_max_battery_voltage": rover.get_daily_max_battery_voltage(),
             "daily_max_charging_current": rover.get_daily_max_charging_current(),
@@ -418,47 +416,94 @@ def read_rover_metrics():
             "daily_discharging_ah": rover.get_daily_discharging_ah(),
             "daily_power_generation_kwh": rover.get_daily_power_generation(),
             "daily_power_consumption_kwh": rover.get_daily_power_consumption(),
-            
-            # Extended metrics - Historical data
             "total_operating_days": rover.get_total_operating_days(),
             "total_battery_over_discharges": current_over_discharge_count,
             "total_battery_full_charges": rover.get_total_battery_full_charges(),
             "new_over_discharge_event": new_over_discharge_event,
-            
-            # Extended metrics - Cumulative totals
             "total_charging_ah": rover.get_total_charging_ah(),
             "total_discharging_ah": rover.get_total_discharging_ah(),
             "cumulative_power_generation_kwh": rover.get_cumulative_power_generation(),
             "cumulative_power_consumption_kwh": rover.get_cumulative_power_consumption(),
-            
-            # Load status
             "load_is_on": 1 if (load_status and load_status['is_on']) else 0,
             "load_brightness": load_status['brightness'] if load_status else None,
-            # Convert charging state to numeric code (0=deactivated, 1=activated, 2=mppt, 3=equalizing, 4=boost, 5=floating, 6=current_limiting, -1=unknown)
             "charging_state_code": {
                 'deactivated': 0, 'activated': 1, 'mppt': 2, 'equalizing': 3,
                 'boost': 4, 'floating': 5, 'current_limiting': 6
             }.get(load_status['charging_state'] if load_status else 'unknown', -1),
-            
-            # Fault information
             "active_faults": active_faults,
             "active_faults_count": len(active_faults),
-            
-            # Communication health
             "modbus_error_rate": rover.get_error_rate(),
             "modbus_total_reads": rover.total_reads,
             "modbus_failed_reads": rover.read_errors,
         }
-        
-        # Mark successful read
+
+        # Invalidate batch cache after reading so next poll starts fresh
+        rover.invalidate_batch_cache()
+
         last_successful_connection = datetime.now()
-        
         return metrics
-        
+
     except Exception as e:
         logging.error(f"Failed to read metrics from Renogy Rover: {e}")
         logging.error(traceback.format_exc())
+        rover.invalidate_batch_cache()
         return None
+
+# ============================================================================
+# DAILY SUMMARY (#11)
+# ============================================================================
+
+def update_daily_summary(metrics):
+    """Update DailySummary with current metrics values."""
+    if metrics is None:
+        return
+    if metrics.get('daily_power_generation_kwh') is not None:
+        daily_summary.update('solar_kwh', metrics['daily_power_generation_kwh'])
+    if metrics.get('battery_soc') is not None:
+        daily_summary.update('battery_soc', metrics['battery_soc'])
+    if metrics.get('solar_input_power') is not None:
+        daily_summary.update('solar_power_w', metrics['solar_input_power'])
+
+def check_daily_summary():
+    """Send daily summary email if due."""
+    if not daily_summary.should_send(DAILY_SUMMARY_HOUR):
+        return
+
+    active_alert_count = sum(
+        1 for s in alert_manager.all_states().values() if s.get('active', False)
+    )
+
+    solar_kwh_today  = daily_summary.get_sum('solar_kwh')
+    soc_min          = daily_summary.get_min('battery_soc')
+    soc_max          = daily_summary.get_max('battery_soc')
+    soc_avg          = daily_summary.get_avg('battery_soc')
+    solar_power_max  = daily_summary.get_max('solar_power_w')
+
+    def _fmt(v, fmt='.1f'):
+        return f"{v:{fmt}}" if v is not None else "N/A"
+
+    body = (
+        f"Renogy Solar Daily Summary\n"
+        f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"Generated: {datetime.now().strftime('%H:%M:%S')}\n\n"
+        f"Solar Generation:\n"
+        f"  Today's generation: {_fmt(solar_kwh_today, '.4f')} kWh\n"
+        f"  Peak solar power:   {_fmt(solar_power_max, '.0f')} W\n\n"
+        f"Battery:\n"
+        f"  SOC min:  {_fmt(soc_min)}%\n"
+        f"  SOC max:  {_fmt(soc_max)}%\n"
+        f"  SOC avg:  {_fmt(soc_avg)}%\n\n"
+        f"Active alerts: {active_alert_count}\n"
+    )
+    if active_alert_count > 0:
+        body += "\nCurrently active alerts:\n"
+        for atype, s in alert_manager.all_states().items():
+            if s.get('active'):
+                since = s.get('first_detected', 'unknown')
+                body += f"  - {atype} (since {since})\n"
+
+    if send_email_alert(f"Daily Summary: Renogy {datetime.now().strftime('%Y-%m-%d')}", body):
+        daily_summary.mark_sent()
 
 # ============================================================================
 # ALERT CHECKING
@@ -467,15 +512,15 @@ def read_rover_metrics():
 def check_critical_conditions(metrics):
     """Check for critical conditions and send alerts (with throttling)"""
     active_alerts = []
-    
-    # First, validate data quality
+
+    # Data quality check
     is_valid, validation_issues = validate_metrics(metrics)
     if not is_valid:
         alert_type = 'data_quality_issue'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             issues_text = "\n".join([f"  - {issue}" for issue in validation_issues])
-            subject = "⚠ Data Quality Issue Detected"
+            subject = "Warning: Data Quality Issue Detected"
             content = (
                 f"Invalid sensor readings detected:\n\n{issues_text}\n\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -483,18 +528,18 @@ def check_critical_conditions(metrics):
                 f"This may indicate sensor failure or communication errors."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
+                alert_manager.mark_sent(alert_type)
                 logging.warning(f"Data quality alert sent: {len(validation_issues)} issues")
         active_alerts.append(alert_type)
     else:
-        clear_alert('data_quality_issue')
-    
-    # Check for new over-discharge events
+        alert_manager.clear('data_quality_issue')
+
+    # Over-discharge event
     if metrics.get("new_over_discharge_event"):
         alert_type = 'over_discharge_event'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "⚠ Battery Over-Discharge Event Detected"
+            subject = "Warning: Battery Over-Discharge Event Detected"
             content = (
                 f"A new over-discharge event has been recorded!\n\n"
                 f"Total over-discharge events: {metrics['total_battery_over_discharges']}\n"
@@ -502,19 +547,19 @@ def check_critical_conditions(metrics):
                 f"Current battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Alert reason: {reason}\n"
-                f"Over-discharging reduces battery lifespan. Consider increasing low-voltage disconnect threshold."
+                f"Over-discharging reduces battery lifespan. "
+                f"Consider increasing low-voltage disconnect threshold."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
-                logging.warning(f"Over-discharge event alert sent")
+                alert_manager.mark_sent(alert_type)
+                logging.warning("Over-discharge event alert sent")
         active_alerts.append(alert_type)
     else:
-        clear_alert('over_discharge_event')
-    
-    # Check for hardware faults
+        alert_manager.clear('over_discharge_event')
+
+    # Hardware faults
     active_faults = metrics.get("active_faults", [])
-    
-    # Critical faults that require immediate attention
+
     critical_faults = [
         'charge_mos_short_circuit',
         'anti_reverse_mos_short',
@@ -523,72 +568,72 @@ def check_critical_conditions(metrics):
         'battery_over_voltage',
         'battery_over_discharge'
     ]
-    
+
     critical_faults_present = [f for f in active_faults if f in critical_faults]
-    
+
     if critical_faults_present and not DISABLE_FAULT_ALERTS:
         alert_type = 'critical_hardware_fault'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             faults_text = "\n".join([f"  - {fault}" for fault in critical_faults_present])
-            subject = "🚨 CRITICAL Hardware Fault Detected"
+            subject = "CRITICAL Hardware Fault Detected"
             content = (
                 f"CRITICAL HARDWARE FAULT(S) DETECTED:\n\n{faults_text}\n\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Solar power: {metrics['solar_input_power']}W\n"
-                f"Controller temp: {metrics['controller_temperature']:.1f}°C\n"
+                f"Controller temp: {metrics['controller_temperature']:.1f}C\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Alert reason: {reason}\n"
                 f"IMMEDIATE ACTION REQUIRED! System may be damaged or unsafe."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
+                alert_manager.mark_sent(alert_type)
                 logging.error(f"Critical hardware fault alert sent: {critical_faults_present}")
         active_alerts.append(alert_type)
     else:
-        if clear_alert('critical_hardware_fault'):
+        if alert_manager.clear('critical_hardware_fault'):
             send_email_alert(
-                "✓ Critical Hardware Faults Cleared",
+                "Critical Hardware Faults Cleared",
                 f"All critical hardware faults have been resolved.\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-    
-    # Non-critical faults (warnings)
+
+    # Non-critical faults
     warning_faults = [f for f in active_faults if f not in critical_faults]
-    
+
     if warning_faults and not DISABLE_FAULT_ALERTS:
         alert_type = 'hardware_fault'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             faults_text = "\n".join([f"  - {fault}" for fault in warning_faults])
-            subject = "⚠ Hardware Warning Detected"
+            subject = "Hardware Warning Detected"
             content = (
                 f"Hardware warning(s) detected:\n\n{faults_text}\n\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Solar power: {metrics['solar_input_power']}W\n"
-                f"Controller temp: {metrics['controller_temperature']:.1f}°C\n"
+                f"Controller temp: {metrics['controller_temperature']:.1f}C\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Alert reason: {reason}\n"
                 f"Monitor the situation and investigate if warnings persist."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
+                alert_manager.mark_sent(alert_type)
                 logging.warning(f"Hardware warning alert sent: {warning_faults}")
         active_alerts.append(alert_type)
     else:
-        if clear_alert('hardware_fault') and not critical_faults_present:
+        if alert_manager.clear('hardware_fault') and not critical_faults_present:
             send_email_alert(
-                "✓ Hardware Warnings Cleared",
+                "Hardware Warnings Cleared",
                 f"All hardware warnings have been resolved.\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-    
+
     # Low battery voltage
-    if metrics["battery_voltage"] < LOW_BATTERY_VOLTAGE_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
+    if metrics["battery_voltage"] is not None and metrics["battery_voltage"] < LOW_BATTERY_VOLTAGE_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
         alert_type = 'low_battery_voltage'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "⚠ Low Battery Voltage Alert"
+            subject = "Warning: Low Battery Voltage Alert"
             content = (
                 f"Battery voltage is critically low: {metrics['battery_voltage']:.2f}V\n"
                 f"Threshold: {LOW_BATTERY_VOLTAGE_THRESHOLD}V\n"
@@ -601,22 +646,22 @@ def check_critical_conditions(metrics):
                 f"Immediate action required!"
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
+                alert_manager.mark_sent(alert_type)
                 logging.warning(f"Low battery voltage alert sent: {metrics['battery_voltage']:.2f}V")
         active_alerts.append(alert_type)
     else:
-        if clear_alert('low_battery_voltage'):
+        if alert_manager.clear('low_battery_voltage') and metrics.get("battery_voltage") is not None:
             send_email_alert(
-                "✓ Battery Voltage Recovered",
+                "Battery Voltage Recovered",
                 f"Battery voltage has recovered to {metrics['battery_voltage']:.2f}V"
             )
-    
+
     # Low battery SOC
-    if metrics["battery_soc"] < LOW_BATTERY_SOC_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
+    if metrics["battery_soc"] is not None and metrics["battery_soc"] < LOW_BATTERY_SOC_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
         alert_type = 'low_battery_soc'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "⚠ Low Battery State of Charge"
+            subject = "Warning: Low Battery State of Charge"
             content = (
                 f"Battery SOC is low: {metrics['battery_soc']}%\n"
                 f"Threshold: {LOW_BATTERY_SOC_THRESHOLD}%\n"
@@ -629,24 +674,24 @@ def check_critical_conditions(metrics):
                 f"Consider reducing load or waiting for solar charging."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
+                alert_manager.mark_sent(alert_type)
                 logging.warning(f"Low battery SOC alert sent: {metrics['battery_soc']}%")
         active_alerts.append(alert_type)
     else:
-        if clear_alert('low_battery_soc'):
+        if alert_manager.clear('low_battery_soc') and metrics.get("battery_soc") is not None:
             send_email_alert(
-                "✓ Battery SOC Recovered",
+                "Battery SOC Recovered",
                 f"Battery SOC has recovered to {metrics['battery_soc']}%"
             )
-    
+
     # Low battery capacity (Ah remaining)
-    if (metrics["battery_capacity_ah_remaining"] is not None and 
-        metrics["battery_capacity_ah_remaining"] < LOW_BATTERY_CAPACITY_AH_THRESHOLD and 
-        not DISABLE_CAPACITY_ALERTS):
+    if (metrics["battery_capacity_ah_remaining"] is not None and
+            metrics["battery_capacity_ah_remaining"] < LOW_BATTERY_CAPACITY_AH_THRESHOLD and
+            not DISABLE_CAPACITY_ALERTS):
         alert_type = 'low_battery_capacity'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "⚠ Low Battery Capacity Alert"
+            subject = "Warning: Low Battery Capacity Alert"
             content = (
                 f"Remaining battery capacity is low: {metrics['battery_capacity_ah_remaining']:.1f}Ah\n"
                 f"Threshold: {LOW_BATTERY_CAPACITY_AH_THRESHOLD}Ah\n"
@@ -659,25 +704,33 @@ def check_critical_conditions(metrics):
                 f"Battery will be depleted soon if discharge continues."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
-                logging.warning(f"Low battery capacity alert sent: {metrics['battery_capacity_ah_remaining']:.1f}Ah")
+                alert_manager.mark_sent(alert_type)
+                logging.warning(
+                    f"Low battery capacity alert sent: "
+                    f"{metrics['battery_capacity_ah_remaining']:.1f}Ah"
+                )
         active_alerts.append(alert_type)
     else:
-        if clear_alert('low_battery_capacity'):
+        if (alert_manager.clear('low_battery_capacity') and
+                metrics.get("battery_capacity_ah_remaining") is not None):
             send_email_alert(
-                "✓ Battery Capacity Recovered",
-                f"Battery capacity has recovered to {metrics['battery_capacity_ah_remaining']:.1f}Ah ({metrics['battery_soc']}%)"
+                "Battery Capacity Recovered",
+                f"Battery capacity has recovered to "
+                f"{metrics['battery_capacity_ah_remaining']:.1f}Ah ({metrics['battery_soc']}%)"
             )
-    
+
     # High controller temperature
-    if metrics["controller_temperature"] > HIGH_CONTROLLER_TEMPERATURE_THRESHOLD and not DISABLE_TEMPERATURE_ALERTS:
+    if (metrics["controller_temperature"] is not None and
+            metrics["controller_temperature"] > HIGH_CONTROLLER_TEMPERATURE_THRESHOLD and
+            not DISABLE_TEMPERATURE_ALERTS):
         alert_type = 'high_controller_temp'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "🔥 High Controller Temperature Alert"
+            subject = "Warning: High Controller Temperature Alert"
             content = (
-                f"Controller temperature is dangerously high: {metrics['controller_temperature']:.1f}°C\n"
-                f"Threshold: {HIGH_CONTROLLER_TEMPERATURE_THRESHOLD}°C\n"
+                f"Controller temperature is dangerously high: "
+                f"{metrics['controller_temperature']:.1f}C\n"
+                f"Threshold: {HIGH_CONTROLLER_TEMPERATURE_THRESHOLD}C\n"
                 f"Solar input: {metrics['solar_input_power']}W\n"
                 f"Charging current: {metrics['solar_input_current']:.1f}A\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -685,25 +738,32 @@ def check_critical_conditions(metrics):
                 f"Immediate action required! Improve ventilation or reduce load."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
-                logging.warning(f"High controller temp alert sent: {metrics['controller_temperature']:.1f}°C")
+                alert_manager.mark_sent(alert_type)
+                logging.warning(
+                    f"High controller temp alert sent: {metrics['controller_temperature']:.1f}C"
+                )
         active_alerts.append(alert_type)
     else:
-        if clear_alert('high_controller_temp'):
+        if (alert_manager.clear('high_controller_temp') and
+                metrics.get("controller_temperature") is not None):
             send_email_alert(
-                "✓ Controller Temperature Normal",
-                f"Controller temperature has returned to normal: {metrics['controller_temperature']:.1f}°C"
+                "Controller Temperature Normal",
+                f"Controller temperature has returned to normal: "
+                f"{metrics['controller_temperature']:.1f}C"
             )
-    
+
     # High battery temperature
-    if metrics["battery_temperature"] > HIGH_BATTERY_TEMPERATURE_THRESHOLD and not DISABLE_TEMPERATURE_ALERTS:
+    if (metrics["battery_temperature"] is not None and
+            metrics["battery_temperature"] > HIGH_BATTERY_TEMPERATURE_THRESHOLD and
+            not DISABLE_TEMPERATURE_ALERTS):
         alert_type = 'high_battery_temp'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "🔥 High Battery Temperature Alert"
+            subject = "Warning: High Battery Temperature Alert"
             content = (
-                f"Battery temperature is dangerously high: {metrics['battery_temperature']:.1f}°C\n"
-                f"Threshold: {HIGH_BATTERY_TEMPERATURE_THRESHOLD}°C\n"
+                f"Battery temperature is dangerously high: "
+                f"{metrics['battery_temperature']:.1f}C\n"
+                f"Threshold: {HIGH_BATTERY_TEMPERATURE_THRESHOLD}C\n"
                 f"Charging current: {metrics['solar_input_current']:.1f}A\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -711,25 +771,32 @@ def check_critical_conditions(metrics):
                 f"DANGER! Battery may be damaged. Improve cooling immediately!"
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
-                logging.error(f"High battery temp alert sent: {metrics['battery_temperature']:.1f}°C")
+                alert_manager.mark_sent(alert_type)
+                logging.error(
+                    f"High battery temp alert sent: {metrics['battery_temperature']:.1f}C"
+                )
         active_alerts.append(alert_type)
     else:
-        if clear_alert('high_battery_temp'):
+        if (alert_manager.clear('high_battery_temp') and
+                metrics.get("battery_temperature") is not None):
             send_email_alert(
-                "✓ Battery Temperature Normal",
-                f"Battery temperature has returned to safe levels: {metrics['battery_temperature']:.1f}°C"
+                "Battery Temperature Normal",
+                f"Battery temperature has returned to safe levels: "
+                f"{metrics['battery_temperature']:.1f}C"
             )
-    
+
     # Low battery temperature
-    if metrics["battery_temperature"] < LOW_BATTERY_TEMPERATURE_THRESHOLD and not DISABLE_TEMPERATURE_ALERTS:
+    if (metrics["battery_temperature"] is not None and
+            metrics["battery_temperature"] < LOW_BATTERY_TEMPERATURE_THRESHOLD and
+            not DISABLE_TEMPERATURE_ALERTS):
         alert_type = 'low_battery_temp'
-        should_send, reason = should_send_alert(alert_type)
+        should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
-            subject = "❄ Low Battery Temperature Alert"
+            subject = "Warning: Low Battery Temperature Alert"
             content = (
-                f"Battery temperature is critically low: {metrics['battery_temperature']:.1f}°C\n"
-                f"Threshold: {LOW_BATTERY_TEMPERATURE_THRESHOLD}°C\n"
+                f"Battery temperature is critically low: "
+                f"{metrics['battery_temperature']:.1f}C\n"
+                f"Threshold: {LOW_BATTERY_TEMPERATURE_THRESHOLD}C\n"
                 f"Battery SOC: {metrics['battery_soc']}%\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -737,16 +804,20 @@ def check_critical_conditions(metrics):
                 f"Battery performance reduced. Consider insulation or heating."
             )
             if send_email_alert(subject, content):
-                mark_alert_sent(alert_type)
-                logging.warning(f"Low battery temp alert sent: {metrics['battery_temperature']:.1f}°C")
+                alert_manager.mark_sent(alert_type)
+                logging.warning(
+                    f"Low battery temp alert sent: {metrics['battery_temperature']:.1f}C"
+                )
         active_alerts.append(alert_type)
     else:
-        if clear_alert('low_battery_temp'):
+        if (alert_manager.clear('low_battery_temp') and
+                metrics.get("battery_temperature") is not None):
             send_email_alert(
-                "✓ Battery Temperature Normal",
-                f"Battery temperature has risen to safe levels: {metrics['battery_temperature']:.1f}°C"
+                "Battery Temperature Normal",
+                f"Battery temperature has risen to safe levels: "
+                f"{metrics['battery_temperature']:.1f}C"
             )
-    
+
     return active_alerts
 
 # ============================================================================
@@ -759,79 +830,86 @@ def write_metrics_to_file(metrics, active_alerts, temp_file_path, final_file_pat
         with open(temp_file_path, 'w') as temp_file:
             # Write all numeric metrics
             for key, value in metrics.items():
-                # Skip non-numeric values and special keys
                 if key in ['active_faults', 'charging_state', 'new_over_discharge_event']:
                     continue
-                
-                # Skip None values - they can't be represented in Prometheus
                 if value is None:
                     continue
-                
-                # Validate value is actually a number
                 try:
                     float(value)
                 except (ValueError, TypeError):
                     logging.warning(f"Skipping non-numeric metric {key}={value}")
                     continue
-                
+
                 temp_file.write(f'# HELP {key} Renogy solar charge controller metric\n')
                 temp_file.write(f'# TYPE {key} gauge\n')
                 temp_file.write(f'{key}{{source="renogy"}} {value}\n')
-            
-            # Write battery capacity configuration
+
+            # Battery capacity configuration
             temp_file.write(f'# HELP battery_capacity_total Total battery capacity in Ah\n')
             temp_file.write(f'# TYPE battery_capacity_total gauge\n')
             temp_file.write(f'battery_capacity_total{{source="renogy"}} {BATTERY_CAPACITY_AH}\n')
-            
-            # Write fault flags as individual metrics
+
+            # Fault flags
             for fault in metrics.get('active_faults', []):
                 safe_fault_name = fault.replace('-', '_')
                 temp_file.write(f'# HELP renogy_fault_{safe_fault_name} Fault status\n')
                 temp_file.write(f'# TYPE renogy_fault_{safe_fault_name} gauge\n')
                 temp_file.write(f'renogy_fault_{safe_fault_name}{{source="renogy"}} 1\n')
-            
-            # Write alert status
+
+            # Alert status
             temp_file.write('# HELP renogy_alerts_active Active alert count\n')
             temp_file.write('# TYPE renogy_alerts_active gauge\n')
             temp_file.write(f'renogy_alerts_active{{source="renogy"}} {len(active_alerts)}\n')
-            
-            for alert_type in alert_state:
-                status = 1 if alert_state[alert_type]['active'] else 0
+
+            for alert_type, s in alert_manager.all_states().items():
+                status = 1 if s['active'] else 0
                 temp_file.write(f'# HELP renogy_alert_{alert_type} Alert status\n')
                 temp_file.write(f'# TYPE renogy_alert_{alert_type} gauge\n')
                 temp_file.write(f'renogy_alert_{alert_type}{{source="renogy"}} {status}\n')
-            
+
             # Maintenance mode flags
-            temp_file.write('# HELP renogy_emails_disabled Email alerts disabled (1=disabled, 0=enabled)\n')
+            temp_file.write('# HELP renogy_emails_disabled Email alerts disabled\n')
             temp_file.write('# TYPE renogy_emails_disabled gauge\n')
             temp_file.write(f'renogy_emails_disabled{{source="renogy"}} {1 if DISABLE_EMAILS else 0}\n')
-            
-            temp_file.write('# HELP renogy_low_battery_alerts_disabled Low battery alerts disabled (1=disabled, 0=enabled)\n')
+
+            temp_file.write('# HELP renogy_low_battery_alerts_disabled Low battery alerts disabled\n')
             temp_file.write('# TYPE renogy_low_battery_alerts_disabled gauge\n')
-            temp_file.write(f'renogy_low_battery_alerts_disabled{{source="renogy"}} {1 if DISABLE_LOW_BATTERY_ALERTS else 0}\n')
-            
-            temp_file.write('# HELP renogy_fault_alerts_disabled Fault alerts disabled (1=disabled, 0=enabled)\n')
+            temp_file.write(
+                f'renogy_low_battery_alerts_disabled{{source="renogy"}} '
+                f'{1 if DISABLE_LOW_BATTERY_ALERTS else 0}\n'
+            )
+
+            temp_file.write('# HELP renogy_fault_alerts_disabled Fault alerts disabled\n')
             temp_file.write('# TYPE renogy_fault_alerts_disabled gauge\n')
-            temp_file.write(f'renogy_fault_alerts_disabled{{source="renogy"}} {1 if DISABLE_FAULT_ALERTS else 0}\n')
-            
-            temp_file.write('# HELP renogy_temperature_alerts_disabled Temperature alerts disabled (1=disabled, 0=enabled)\n')
+            temp_file.write(
+                f'renogy_fault_alerts_disabled{{source="renogy"}} '
+                f'{1 if DISABLE_FAULT_ALERTS else 0}\n'
+            )
+
+            temp_file.write('# HELP renogy_temperature_alerts_disabled Temperature alerts disabled\n')
             temp_file.write('# TYPE renogy_temperature_alerts_disabled gauge\n')
-            temp_file.write(f'renogy_temperature_alerts_disabled{{source="renogy"}} {1 if DISABLE_TEMPERATURE_ALERTS else 0}\n')
-            
-            temp_file.write('# HELP renogy_capacity_alerts_disabled Capacity alerts disabled (1=disabled, 0=enabled)\n')
+            temp_file.write(
+                f'renogy_temperature_alerts_disabled{{source="renogy"}} '
+                f'{1 if DISABLE_TEMPERATURE_ALERTS else 0}\n'
+            )
+
+            temp_file.write('# HELP renogy_capacity_alerts_disabled Capacity alerts disabled\n')
             temp_file.write('# TYPE renogy_capacity_alerts_disabled gauge\n')
-            temp_file.write(f'renogy_capacity_alerts_disabled{{source="renogy"}} {1 if DISABLE_CAPACITY_ALERTS else 0}\n')
-            
-            # Write health metric
+            temp_file.write(
+                f'renogy_capacity_alerts_disabled{{source="renogy"}} '
+                f'{1 if DISABLE_CAPACITY_ALERTS else 0}\n'
+            )
+
+            # Health metric
             temp_file.write('# HELP renogy_monitor_healthy Monitor health status\n')
             temp_file.write('# TYPE renogy_monitor_healthy gauge\n')
             temp_file.write(f'renogy_monitor_healthy{{source="renogy"}} 1\n')
-            
-            # Write last update timestamp
+
+            # Last update timestamp
             temp_file.write('# HELP renogy_last_update Last update timestamp\n')
             temp_file.write('# TYPE renogy_last_update gauge\n')
             temp_file.write(f'renogy_last_update{{source="renogy"}} {int(time.time())}\n')
-        
+
         os.rename(temp_file_path, final_file_path)
     except IOError as e:
         logging.error(f"Failed to write metrics to file: {e}")
@@ -846,8 +924,8 @@ print(f"Email throttling: {EMAIL_COOLDOWN_MINUTES}min cooldown, {EMAIL_REMINDER_
 print(f"Error logging: {LOG_FILE_PATH}")
 print(f"Data export: {FINAL_FILE_PATH}")
 print(f"Features: Extended stats, Fault monitoring, Capacity tracking, Data validation")
+print(f"New: Batch Modbus reads, Hardware watchdog, Daily summary, SIGHUP reload")
 
-# Show disabled subsystems
 disabled_systems = []
 if DISABLE_EMAILS:
     disabled_systems.append("EMAILS")
@@ -862,10 +940,10 @@ if DISABLE_CAPACITY_ALERTS:
 
 if disabled_systems:
     print()
-    print("🔧" * 35)
-    print("   ⚠️  MAINTENANCE MODE ACTIVE ⚠️")
-    print(f"   DISABLED: {', '.join(disabled_systems)}")
-    print("🔧" * 35)
+    print("=" * 70)
+    print("  MAINTENANCE MODE ACTIVE")
+    print(f"  DISABLED: {', '.join(disabled_systems)}")
+    print("=" * 70)
 print()
 
 consecutive_failures = 0
@@ -874,33 +952,35 @@ max_consecutive_failures = 5
 try:
     while True:
         metrics = read_rover_metrics()
-        
+
         if metrics:
             consecutive_failures = 0
             active_alerts = check_critical_conditions(metrics)
+            update_daily_summary(metrics)
+            check_daily_summary()
             write_metrics_to_file(metrics, active_alerts, TEMP_FILE_PATH, FINAL_FILE_PATH)
         else:
             consecutive_failures += 1
             logging.error(f"Failed to read metrics ({consecutive_failures}/{max_consecutive_failures})")
-            
+
             if consecutive_failures >= max_consecutive_failures:
-                logging.critical(f"Failed to read metrics {consecutive_failures} times in a row, attempting reconnection")
+                logging.critical(
+                    f"Failed to read metrics {consecutive_failures} times in a row, "
+                    f"attempting reconnection"
+                )
                 if not initialize_rover():
                     logging.critical("Reconnection failed, will retry on next cycle")
-                    # Write unhealthy status
                     try:
                         with open(TEMP_FILE_PATH, 'w') as f:
                             f.write('# HELP renogy_monitor_healthy Monitor health status\n')
                             f.write('# TYPE renogy_monitor_healthy gauge\n')
                             f.write('renogy_monitor_healthy{source="renogy"} 0\n')
                         os.rename(TEMP_FILE_PATH, FINAL_FILE_PATH)
-                    except:
+                    except Exception:
                         pass
                 consecutive_failures = 0
-        
-        # Check connection health periodically
+
         check_connection_health()
-        
         time.sleep(SLEEP_TIME)
 
 except KeyboardInterrupt:
@@ -909,5 +989,7 @@ except Exception as e:
     logging.critical(f"Unexpected error in main loop: {e}")
     logging.critical(traceback.format_exc())
 finally:
-    save_alert_state()
+    alert_manager.save()
+    if watchdog:
+        watchdog.stop()
     print("Renogy monitor stopped")
