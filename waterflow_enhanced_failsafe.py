@@ -37,7 +37,6 @@ import threading
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
-import credentials as cr
 
 from monitor_common import (
     AlertManager,

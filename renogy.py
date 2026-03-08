@@ -28,7 +28,6 @@ import signal
 import traceback
 from datetime import datetime, timedelta
 from renogy_extended import RenogyRoverExtended
-import credentials as cr
 
 # Load shared modules
 from monitor_common import (
