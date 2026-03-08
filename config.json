@@ -124,5 +124,13 @@
     "enabled": true,
     "device": "/dev/watchdog",
     "interval_seconds": 30
+  },
+  "shutdown": {
+    "critical_soc_pct": 5,
+    "sustained_seconds": 120,
+    "recovery_soc_pct": 15
+  },
+  "system": {
+    "disk_alert_pct": 85
   }
 }

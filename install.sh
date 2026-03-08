@@ -25,14 +25,14 @@ echo " Credentials file  : $CREDS_FILE"
 echo "================================================="
 echo ""
 
-# --- [1/11] Python dependencies ---
-echo "[1/11] Installing Python packages..."
+# --- [1/12] Python dependencies ---
+echo "[1/12] Installing Python packages..."
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
 pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280
 echo "      Done."
 
-# --- [2/11] Prometheus node_exporter ---
-echo "[2/11] Installing Prometheus node_exporter..."
+# --- [2/12] Prometheus node_exporter ---
+echo "[2/12] Installing Prometheus node_exporter..."
 apt-get install -y prometheus-node-exporter
 
 # Override service to add textfile collector pointing at /ramdisk
@@ -53,8 +53,8 @@ echo "      node_exporter installed and configured."
 echo "      Textfile collector : /ramdisk/*.prom"
 echo "      Metrics endpoint   : http://$(hostname -I | awk '{print $1}'):9100/metrics"
 
-# --- [3/11] Prometheus ---
-echo "[3/11] Installing Prometheus..."
+# --- [3/12] Prometheus ---
+echo "[3/12] Installing Prometheus..."
 apt-get install -y prometheus
 
 # Install our scrape config
@@ -68,8 +68,34 @@ echo "      Scraping            : localhost:9100"
 echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
 echo "      NOTE: Point your Grafana datasource at http://<PI_IP>:9090"
 
-# --- [4/11] Hardware interfaces ---
-echo "[4/11] Enabling hardware interfaces..."
+# --- [4/12] Firewall (ufw) ---
+echo "[4/12] Configuring firewall..."
+if command -v ufw &>/dev/null; then
+    # Ensure SSH is allowed before enabling ufw (don't lock ourselves out)
+    ufw allow OpenSSH 2>/dev/null || ufw allow 22/tcp
+
+    # Allow Prometheus and node_exporter from local network
+    # Default to whole RFC1918 private ranges; user can tighten later
+    ufw allow from 10.0.0.0/8 to any port 9090 comment 'Prometheus (solar monitor)'
+    ufw allow from 172.16.0.0/12 to any port 9090 comment 'Prometheus (solar monitor)'
+    ufw allow from 192.168.0.0/16 to any port 9090 comment 'Prometheus (solar monitor)'
+    ufw allow from 10.0.0.0/8 to any port 9100 comment 'node_exporter (solar monitor)'
+    ufw allow from 172.16.0.0/12 to any port 9100 comment 'node_exporter (solar monitor)'
+    ufw allow from 192.168.0.0/16 to any port 9100 comment 'node_exporter (solar monitor)'
+
+    # Enable ufw non-interactively
+    ufw --force enable
+    echo "      Firewall configured. Ports 9090 and 9100 open to private networks."
+    echo "      To restrict to a specific host:"
+    echo "        sudo ufw delete allow from 192.168.0.0/16 to any port 9090"
+    echo "        sudo ufw allow from <HOST_IP> to any port 9090"
+else
+    echo "      ufw not found — skipping firewall setup."
+    echo "      Manually allow ports 9090 and 9100 from your Grafana host."
+fi
+
+# --- [5/12] Hardware interfaces ---
+echo "[5/12] Enabling hardware interfaces..."
 if command -v raspi-config &>/dev/null; then
     raspi-config nonint do_serial_hw 0    # Enable UART hardware
     raspi-config nonint do_serial_cons 1  # Disable serial login console (/dev/serial0)
@@ -84,8 +110,8 @@ else
     echo "        - 1-Wire"
 fi
 
-# --- [5/11] Hardware watchdog ---
-echo "[5/11] Configuring hardware watchdog..."
+# --- [6/12] Hardware watchdog ---
+echo "[6/12] Configuring hardware watchdog..."
 CONFIG_TXT=""
 if [[ -f /boot/firmware/config.txt ]]; then
     CONFIG_TXT="/boot/firmware/config.txt"
@@ -115,14 +141,14 @@ else
 fi
 echo "      NOTE: A reboot is required for watchdog changes to take effect."
 
-# --- [6/11] User group memberships ---
-echo "[6/11] Adding $SERVICE_USER to hardware groups..."
+# --- [7/12] User group memberships ---
+echo "[7/12] Adding $SERVICE_USER to hardware groups..."
 usermod -aG dialout,gpio,i2c "$SERVICE_USER"
 echo "      Added to: dialout (serial), gpio, i2c"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
-# --- [7/11] Ramdisk ---
-echo "[7/11] Setting up ramdisk at /ramdisk..."
+# --- [8/12] Ramdisk ---
+echo "[8/12] Setting up ramdisk at /ramdisk..."
 mkdir -p /ramdisk
 if grep -q '/ramdisk' /etc/fstab; then
     echo "      /ramdisk already in /etc/fstab, skipping."
@@ -134,15 +160,15 @@ mount /ramdisk 2>/dev/null && echo "      Mounted /ramdisk." || echo "      /ram
 chown "$SERVICE_USER":root /ramdisk
 chmod 775 /ramdisk
 
-# --- [8/11] Persistent state directory ---
-echo "[8/11] Creating persistent state directory..."
+# --- [9/12] Persistent state directory ---
+echo "[9/12] Creating persistent state directory..."
 mkdir -p /var/lib/renogy
 chown "$SERVICE_USER":root /var/lib/renogy
 chmod 750 /var/lib/renogy
 echo "      /var/lib/renogy/ created (alert state survives reboots)"
 
-# --- [9/11] Email credentials ---
-echo "[9/11] Setting up email credentials..."
+# --- [10/12] Email credentials ---
+echo "[10/12] Setting up email credentials..."
 mkdir -p "$CREDS_DIR"
 chmod 750 "$CREDS_DIR"
 
@@ -158,8 +184,8 @@ else
     echo "      sudo nano $CREDS_FILE"
 fi
 
-# --- [10/11] Log files & logrotate ---
-echo "[10/11] Creating log files..."
+# --- [11/12] Log files & logrotate ---
+echo "[11/12] Creating log files..."
 touch /var/log/renogy.log /var/log/waterflow.log
 chown "$SERVICE_USER":adm /var/log/renogy.log /var/log/waterflow.log
 chmod 664 /var/log/renogy.log /var/log/waterflow.log
@@ -170,8 +196,8 @@ cp "$INSTALL_DIR/logrotate/renogy"    /etc/logrotate.d/renogy
 cp "$INSTALL_DIR/logrotate/waterflow" /etc/logrotate.d/waterflow
 echo "      Logrotate configs installed."
 
-# --- [11/11] Systemd services ---
-echo "[11/11] Installing and enabling monitor services..."
+# --- [12/12] Systemd services ---
+echo "[12/12] Installing and enabling monitor services..."
 sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/renogy.service" > /etc/systemd/system/renogy.service
@@ -180,9 +206,12 @@ sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/waterflow.service" > /etc/systemd/system/waterflow.service
 
+sed -e "s|__DIR__|$INSTALL_DIR|g" \
+    "$INSTALL_DIR/systemd/battery_shutdown.service" > /etc/systemd/system/battery_shutdown.service
+
 systemctl daemon-reload
-systemctl enable renogy.service waterflow.service
-echo "      Services enabled."
+systemctl enable renogy.service waterflow.service battery_shutdown.service
+echo "      Services enabled (renogy, waterflow, battery_shutdown)."
 
 # Only start if credentials have been filled in
 if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then
@@ -191,9 +220,9 @@ if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then
     echo "      Fill in your email credentials first:"
     echo "        sudo nano $CREDS_FILE"
     echo "      Then start services:"
-    echo "        sudo systemctl start renogy waterflow"
+    echo "        sudo systemctl start renogy waterflow battery_shutdown"
 else
-    systemctl start renogy.service waterflow.service
+    systemctl start renogy.service waterflow.service battery_shutdown.service
     echo "      Services started."
 fi
 
@@ -217,9 +246,10 @@ echo "   sudo kill -HUP \$(systemctl show -p MainPID --value renogy)"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value waterflow)"
 echo ""
 echo " Service management:"
-echo "   sudo systemctl status renogy waterflow prometheus prometheus-node-exporter"
+echo "   sudo systemctl status renogy waterflow battery_shutdown prometheus prometheus-node-exporter"
 echo "   sudo journalctl -u renogy -f"
 echo "   sudo journalctl -u waterflow -f"
+echo "   sudo journalctl -u battery_shutdown -f"
 echo ""
 echo " Verify metrics:"
 echo "   curl http://localhost:9100/metrics | grep waterflow_inlet_lpm"
