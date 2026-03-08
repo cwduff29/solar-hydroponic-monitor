@@ -180,6 +180,20 @@ echo "      NOTE: A reboot is required for watchdog changes to take effect."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
+
+# Create watchdog group and udev rule if needed (not present by default on Pi OS)
+if ! getent group watchdog &>/dev/null; then
+    groupadd --system watchdog
+    echo "      Created system group: watchdog"
+fi
+WATCHDOG_UDEV="/etc/udev/rules.d/60-watchdog.rules"
+if [[ ! -f "$WATCHDOG_UDEV" ]]; then
+    echo 'KERNEL=="watchdog", GROUP="watchdog", MODE="0660"' > "$WATCHDOG_UDEV"
+    udevadm control --reload-rules
+    udevadm trigger --name-match=watchdog 2>/dev/null || true
+    echo "      Created udev rule: $WATCHDOG_UDEV"
+fi
+
 usermod -aG dialout,gpio,i2c,watchdog "$SERVICE_USER"
 echo "      Added to: dialout (serial), gpio, i2c, watchdog"
 echo "      NOTE: Group changes take effect after next login / reboot."
