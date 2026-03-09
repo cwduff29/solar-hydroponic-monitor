@@ -148,35 +148,10 @@ else
 fi
 
 # --- [6/13] Hardware watchdog ---
-echo "[6/13] Configuring hardware watchdog..."
-CONFIG_TXT=""
-if [[ -f /boot/firmware/config.txt ]]; then
-    CONFIG_TXT="/boot/firmware/config.txt"
-elif [[ -f /boot/config.txt ]]; then
-    CONFIG_TXT="/boot/config.txt"
-fi
-
-if [[ -n "$CONFIG_TXT" ]]; then
-    if grep -q 'dtparam=watchdog=on' "$CONFIG_TXT"; then
-        echo "      Hardware watchdog already enabled in $CONFIG_TXT"
-    else
-        echo "" >> "$CONFIG_TXT"
-        echo "# Hardware watchdog (solar_hydroponic monitor)" >> "$CONFIG_TXT"
-        echo "dtparam=watchdog=on" >> "$CONFIG_TXT"
-        echo "      Enabled hardware watchdog in $CONFIG_TXT"
-    fi
-else
-    echo "      WARNING: Could not find Pi config.txt — manually add: dtparam=watchdog=on"
-fi
-
-MODPROBE_CONF="/etc/modprobe.d/bcm2835_wdt.conf"
-if [[ ! -f "$MODPROBE_CONF" ]]; then
-    echo "options bcm2835_wdt heartbeat=60 nowayout=0" > "$MODPROBE_CONF"
-    echo "      Created $MODPROBE_CONF (watchdog timeout=60s)"
-else
-    echo "      $MODPROBE_CONF already exists, skipping."
-fi
-echo "      NOTE: A reboot is required for watchdog changes to take effect."
+echo "[6/13] Hardware watchdog — skipped (disabled by default)."
+echo "      The watchdog is off by default (watchdog.enabled=false in config.json)."
+echo "      To enable: set watchdog.enabled=true in config.json, then manually add"
+echo "        dtparam=watchdog=on to /boot/firmware/config.txt and reboot."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
