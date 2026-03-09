@@ -121,7 +121,7 @@
     "battery_data_timeout_seconds": 60
   },
   "watchdog": {
-    "enabled": true,
+    "enabled": false,
     "device": "/dev/watchdog",
     "interval_seconds": 30
   },
