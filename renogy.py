@@ -246,17 +246,7 @@ if not initialize_rover():
     logging.critical("Cannot start monitoring without controller connection")
     exit(1)
 
-# ============================================================================
-# HARDWARE WATCHDOG
-# ============================================================================
-
 watchdog = None
-if get_config('watchdog.enabled', True):
-    watchdog = Watchdog(
-        device=get_config('watchdog.device', '/dev/watchdog'),
-        interval=get_config('watchdog.interval_seconds', 30),
-    )
-    watchdog.start()
 
 # ============================================================================
 # DAILY SUMMARY
@@ -1065,6 +1055,13 @@ print()
 
 consecutive_failures = 0
 max_consecutive_failures = 5
+
+if get_config('watchdog.enabled', False):
+    watchdog = Watchdog(
+        device=get_config('watchdog.device', '/dev/watchdog'),
+        interval=get_config('watchdog.interval_seconds', 30),
+    )
+    watchdog.start()
 
 try:
     while True:
