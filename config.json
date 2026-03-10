@@ -47,7 +47,8 @@
       "warning_delay_seconds": 600,
       "imbalance_threshold_lpm": 0.5,
       "imbalance_duration_seconds": 600,
-      "history_size": 5
+      "history_size": 5,
+      "trend_drop_pct": 0.20
     },
     "temperature": {
       "sensor_map": {
@@ -74,7 +75,9 @@
       "temp_force_on_c": 43.3,
       "humidity_on_pct": 80,
       "humidity_off_pct": 70,
-      "min_toggle_interval_seconds": 120
+      "min_toggle_interval_seconds": 120,
+      "smart_cooling_min_c": 21.1,
+      "smart_heating_max_c": 26.7
     },
     "humidity_alerts": {
       "warning_pct": 80,
@@ -99,6 +102,16 @@
       "cycle_pause_seconds": 5,
       "recovery_wait_seconds": 90,
       "cycle_max_attempts": 2
+    },
+    "maintenance": {
+      "disable_emails": false,
+      "disable_pump_testing": false,
+      "disable_flow_alerts": false,
+      "disable_aerator": false,
+      "disable_fan": false
+    },
+    "health": {
+      "max_consecutive_failures": 5
     }
   },
   "alerts": {
