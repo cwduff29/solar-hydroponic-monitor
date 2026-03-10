@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Complete monitoring with 3-sensor NFT temperature tracking, freeze risk, solar heating analysis, Vista CA climate optimizations, flow trend analysis, daily volume tracking, temperature in \u00b0C, alert state panels, and hardware watchdog monitoring",
+  "description": "Complete monitoring with 3-sensor NFT temperature tracking, freeze risk, solar heating analysis, Vista CA climate optimizations, flow trend analysis, daily volume tracking, temperature in °F, alert state panels, and hardware watchdog monitoring",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -192,7 +192,7 @@
           "refId": "J"
         }
       ],
-      "title": "\ud83d\udd27 Maintenance Mode Status",
+      "title": "🔧 Maintenance Mode Status",
       "type": "stat"
     },
     {
@@ -253,7 +253,7 @@
               "options": {
                 "2": {
                   "color": "green",
-                  "text": "MPPT \u2713"
+                  "text": "MPPT ✓"
                 }
               },
               "type": "value"
@@ -403,7 +403,7 @@
               "options": {
                 "1": {
                   "color": "green",
-                  "text": "HEALTHY \u2713"
+                  "text": "HEALTHY ✓"
                 }
               },
               "type": "value"
@@ -563,7 +563,7 @@
               "options": {
                 "1": {
                   "color": "green",
-                  "text": "HEALTHY \u2713"
+                  "text": "HEALTHY ✓"
                 }
               },
               "type": "value"
@@ -1581,7 +1581,7 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "All temperature sensors in Fahrenheit: Renogy (controller, battery - converted from \u00b0C), NFT system (reservoir, drain, outdoor via DS18B20), and enclosure air (BME280)",
+      "description": "All temperature sensors in Fahrenheit: Renogy (controller, battery - converted from °F), NFT system (reservoir, drain, outdoor via DS18B20), and enclosure air (BME280)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1747,7 +1747,7 @@
           "refId": "F"
         }
       ],
-      "title": "\ud83c\udf21\ufe0f System Temperatures (All 6 Sensors)",
+      "title": "🌡️ System Temperatures (All 6 Sensors)",
       "type": "timeseries"
     },
     {
@@ -1766,7 +1766,7 @@
                 "match": "null",
                 "result": {
                   "color": "green",
-                  "text": "No Active Faults \u2713"
+                  "text": "No Active Faults ✓"
                 }
               },
               "type": "special"
@@ -2221,7 +2221,7 @@
                 },
                 "1": {
                   "color": "green",
-                  "text": "\u2713 OK"
+                  "text": "✓ OK"
                 }
               },
               "type": "value"
@@ -2295,7 +2295,7 @@
           "refId": "E"
         }
       ],
-      "title": "\ud83d\udc8a Sensor Health Status",
+      "title": "💊 Sensor Health Status",
       "type": "stat"
     },
     {
@@ -2401,7 +2401,7 @@
           }
         }
       ],
-      "title": "\ud83d\udd0b Battery Lifetime Health",
+      "title": "🔋 Battery Lifetime Health",
       "type": "stat"
     },
     {
@@ -2554,7 +2554,7 @@
           "refId": "C"
         }
       ],
-      "title": "\ud83d\udce1 MODBUS Communication Health",
+      "title": "📡 MODBUS Communication Health",
       "type": "timeseries"
     },
     {
@@ -2623,7 +2623,7 @@
           "refId": "B"
         }
       ],
-      "title": "\u23f1\ufe0f Monitor Freshness (seconds since update)",
+      "title": "⏱️ Monitor Freshness (seconds since update)",
       "type": "stat"
     },
     {
@@ -2631,7 +2631,7 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "Temperature increase from sun heating exposed NFT pipes. Positive values normal in daytime. Typical peak: +5-15\u00b0F at 2pm. If consistently >20\u00b0F, add shade cloth.",
+      "description": "Temperature increase from sun heating exposed NFT pipes. Positive values normal in daytime. Typical peak: +5-15°F at 2pm. If consistently >20°F, add shade cloth.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2733,7 +2733,7 @@
           "refId": "A"
         }
       ],
-      "title": "\u2600\ufe0f NFT Solar Heating Effect",
+      "title": "☀️ NFT Solar Heating Effect",
       "type": "timeseries"
     },
     {
@@ -2886,7 +2886,7 @@
           "refId": "B"
         }
       ],
-      "title": "\ud83d\udca7 Flow Imbalance Monitor",
+      "title": "💧 Flow Imbalance Monitor",
       "type": "timeseries"
     },
     {
@@ -2894,7 +2894,7 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "Alert when outdoor <35\u00b0F AND reservoir <45\u00b0F. Rare in Vista (1-2 nights/winter). Ground burial provides protection.",
+      "description": "Alert when outdoor <35°F AND reservoir <45°F. Rare in Vista (1-2 nights/winter). Ground burial provides protection.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2904,7 +2904,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Temperature (\u00b0F)",
+            "axisLabel": "Temperature (°F)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -2950,7 +2950,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Outdoor Freeze Threshold (35\u00b0F)"
+              "options": "Outdoor Freeze Threshold (35°F)"
             },
             "properties": [
               {
@@ -2983,7 +2983,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Reservoir Safe Threshold (45\u00b0F)"
+              "options": "Reservoir Safe Threshold (45°F)"
             },
             "properties": [
               {
@@ -3065,7 +3065,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "35",
-          "legendFormat": "Outdoor Freeze Threshold (35\u00b0F)",
+          "legendFormat": "Outdoor Freeze Threshold (35°F)",
           "refId": "C"
         },
         {
@@ -3074,11 +3074,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "45",
-          "legendFormat": "Reservoir Safe Threshold (45\u00b0F)",
+          "legendFormat": "Reservoir Safe Threshold (45°F)",
           "refId": "D"
         }
       ],
-      "title": "\u2744\ufe0f Freeze Risk Monitor (Vista CA)",
+      "title": "❄️ Freeze Risk Monitor (Vista CA)",
       "type": "timeseries"
     },
     {
@@ -3153,7 +3153,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udca7 Enclosure Humidity",
+      "title": "💧 Enclosure Humidity",
       "type": "gauge"
     },
     {
@@ -3172,7 +3172,7 @@
               "options": {
                 "0": {
                   "color": "green",
-                  "text": "\u2713 No Leak"
+                  "text": "✓ No Leak"
                 }
               },
               "type": "value"
@@ -3181,7 +3181,7 @@
               "options": {
                 "1": {
                   "color": "red",
-                  "text": "\u26a0\ufe0f LEAK DETECTED"
+                  "text": "⚠️ LEAK DETECTED"
                 }
               },
               "type": "value"
@@ -3238,7 +3238,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udea8 Leak Alert",
+      "title": "🚨 Leak Alert",
       "type": "stat"
     },
     {
@@ -3311,7 +3311,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83e\udee7 Aeration Mode",
+      "title": "🫧 Aeration Mode",
       "type": "stat"
     },
     {
@@ -3417,7 +3417,7 @@
           "refId": "B"
         }
       ],
-      "title": "\ud83d\udca6 Water Flow Rates",
+      "title": "💦 Water Flow Rates",
       "type": "timeseries"
     },
     {
@@ -3529,7 +3529,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udd0b Battery State of Charge",
+      "title": "🔋 Battery State of Charge",
       "type": "timeseries"
     },
     {
@@ -3537,15 +3537,15 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "Raspberry Pi CPU temperature. Normal: <60\u00b0C, Warning: 60-70\u00b0C, High: 70-80\u00b0C, Critical: >80\u00b0C (throttling starts at 80-85\u00b0C)",
+      "description": "Raspberry Pi CPU temperature. Normal: <140°F, Warning: 140-158°F, High: 158-176°F, Critical: >176°F (throttling starts at 176-185°F)",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
           "mappings": [],
-          "max": 85,
-          "min": 0,
+          "max": 185,
+          "min": 32,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -3555,19 +3555,19 @@
               },
               {
                 "color": "yellow",
-                "value": 60
+                "value": 140
               },
               {
                 "color": "orange",
-                "value": 70
+                "value": 158
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 176
               }
             ]
           },
-          "unit": "celsius"
+          "unit": "fahrenheit"
         },
         "overrides": []
       },
@@ -3604,7 +3604,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83c\udf21\ufe0f Pi CPU Temperature",
+      "title": "🌡️ Pi CPU Temperature",
       "type": "gauge"
     },
     {
@@ -3679,7 +3679,7 @@
           "refId": "A"
         }
       ],
-      "title": "\u26a1 CPU Usage",
+      "title": "⚡ CPU Usage",
       "type": "gauge"
     },
     {
@@ -3754,7 +3754,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udcbe Memory Usage",
+      "title": "💾 Memory Usage",
       "type": "gauge"
     },
     {
@@ -3829,7 +3829,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udcbf Root Disk Usage",
+      "title": "💿 Root Disk Usage",
       "type": "gauge"
     },
     {
@@ -4000,7 +4000,7 @@
           "refId": "D"
         }
       ],
-      "title": "\ud83d\udcca System Load Average",
+      "title": "📊 System Load Average",
       "type": "timeseries"
     },
     {
@@ -4119,7 +4119,7 @@
           "refId": "B"
         }
       ],
-      "title": "\ud83c\udf10 Network Traffic",
+      "title": "🌐 Network Traffic",
       "type": "timeseries"
     },
     {
@@ -4190,7 +4190,7 @@
           "refId": "A"
         }
       ],
-      "title": "\u23f1\ufe0f System Uptime",
+      "title": "⏱️ System Uptime",
       "type": "stat"
     },
     {
@@ -4267,7 +4267,7 @@
           "refId": "A"
         }
       ],
-      "title": "\ud83d\udcbe /ramdisk Usage",
+      "title": "💾 /ramdisk Usage",
       "type": "stat"
     },
     {
@@ -4275,7 +4275,7 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "CPU temperature over time. Pi throttles at 80-85\u00b0C. Good ventilation keeps it <60\u00b0C.",
+      "description": "CPU temperature over time. Pi throttles at 176-185°F. Good ventilation keeps it <140°F.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4325,25 +4325,25 @@
               },
               {
                 "color": "yellow",
-                "value": 60
+                "value": 140
               },
               {
                 "color": "orange",
-                "value": 70
+                "value": 158
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 176
               }
             ]
           },
-          "unit": "celsius"
+          "unit": "fahrenheit"
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Throttle Threshold (80\u00b0C)"
+              "options": "Throttle Threshold (176°F)"
             },
             "properties": [
               {
@@ -4415,16 +4415,16 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "80",
-          "legendFormat": "Throttle Threshold (80\u00b0C)",
+          "legendFormat": "Throttle Threshold (80°F)",
           "refId": "B"
         }
       ],
-      "title": "\ud83c\udf21\ufe0f CPU Temperature History",
+      "title": "🌡️ CPU Temperature History",
       "type": "timeseries"
     },
     {
       "id": 44,
-      "title": "\u26a1 Charging Current",
+      "title": "⚡ Charging Current",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -4849,7 +4849,7 @@
         "type": "prometheus",
         "uid": "bev6xt3wf7n5sb"
       },
-      "description": "All temperature sensors in Celsius",
+      "description": "All temperature sensors in Fahrenheit",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4899,7 +4899,7 @@
               }
             ]
           },
-          "unit": "celsius"
+          "unit": "fahrenheit"
         },
         "overrides": []
       },
@@ -4934,8 +4934,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "waterflow_temperature_celsius{sensor=\"reservoir\",source=\"waterflow\"}",
-          "legendFormat": "Reservoir \u00b0C",
+          "expr": "waterflow_temperature_fahrenheit{sensor=\"reservoir\",source=\"waterflow\"}",
+          "legendFormat": "Reservoir °F",
           "refId": "A"
         },
         {
@@ -4943,8 +4943,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "waterflow_temperature_celsius{sensor=\"nft_drain\",source=\"waterflow\"}",
-          "legendFormat": "NFT Drain \u00b0C",
+          "expr": "waterflow_temperature_fahrenheit{sensor=\"nft_drain\",source=\"waterflow\"}",
+          "legendFormat": "NFT Drain °F",
           "refId": "B"
         },
         {
@@ -4952,8 +4952,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "waterflow_temperature_celsius{sensor=\"outdoor\",source=\"waterflow\"}",
-          "legendFormat": "Outdoor \u00b0C",
+          "expr": "waterflow_temperature_fahrenheit{sensor=\"outdoor\",source=\"waterflow\"}",
+          "legendFormat": "Outdoor °F",
           "refId": "C"
         },
         {
@@ -4961,110 +4961,12 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "enclosure_temperature_celsius{source=\"waterflow\"}",
-          "legendFormat": "Enclosure \u00b0C",
+          "expr": "enclosure_temperature_fahrenheit{source=\"waterflow\"}",
+          "legendFormat": "Enclosure °F",
           "refId": "D"
         }
       ],
-      "title": "Water Temperatures (\u00b0C)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "bev6xt3wf7n5sb"
-      },
-      "description": "Temperature increase from sun heating exposed NFT pipes (\u00b0C). Positive values normal in daytime.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "celsius"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 137
-      },
-      "id": 1005,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "last",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.3.3",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "waterflow_temperature_differential_celsius{diff_type=\"nft_solar_heating\",source=\"waterflow\"}",
-          "legendFormat": "NFT Drain - Reservoir (Solar Heating) \u00b0C",
-          "refId": "A"
-        }
-      ],
-      "title": "NFT Solar Heating Effect (\u00b0C)",
+      "title": "Water Temperatures (°F)",
       "type": "timeseries"
     },
     {
