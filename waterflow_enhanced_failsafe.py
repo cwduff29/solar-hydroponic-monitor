@@ -435,6 +435,11 @@ def setup_gpio():
         f"Board={'ACTIVE_LOW' if RELAY_BOARD_ACTIVE_LOW else 'ACTIVE_HIGH'}"
     )
 
+    for pin in (FLOW_SENSOR_INLET_GPIO, FLOW_SENSOR_OUTLET_GPIO):
+        try:
+            GPIO.remove_event_detect(pin)
+        except Exception:
+            pass
     GPIO.add_event_detect(FLOW_SENSOR_INLET_GPIO,  GPIO.FALLING, callback=countPulse_inlet)
     GPIO.add_event_detect(FLOW_SENSOR_OUTLET_GPIO, GPIO.FALLING, callback=countPulse_outlet)
 
