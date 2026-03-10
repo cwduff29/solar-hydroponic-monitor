@@ -63,17 +63,11 @@ validate_config()
 # ============================================================================
 # Set any of these to True to disable specific functions during maintenance:
 
-DISABLE_EMAILS = False              # True = No email alerts sent (all types)
-DISABLE_PUMP_TESTING = False        # True = No backup pump tests
-DISABLE_FLOW_ALERTS = False         # True = No low flow or leak warnings
-DISABLE_AERATOR = False             # True = Aerator stays OFF
-DISABLE_FAN = False                 # True = Fan stays OFF
-
-# Quick presets (uncomment one to use):
-# FULL_MAINTENANCE: DISABLE_EMAILS=True, DISABLE_PUMP_TESTING=True, DISABLE_FLOW_ALERTS=True
-# RESERVOIR_EMPTY: DISABLE_FLOW_ALERTS=True, DISABLE_PUMP_TESTING=True
-# AERATOR_SERVICE: DISABLE_AERATOR=True
-# FAN_SERVICE: DISABLE_FAN=True
+DISABLE_EMAILS       = get_config('waterflow.maintenance.disable_emails',       False)
+DISABLE_PUMP_TESTING = get_config('waterflow.maintenance.disable_pump_testing',  False)
+DISABLE_FLOW_ALERTS  = get_config('waterflow.maintenance.disable_flow_alerts',   False)
+DISABLE_AERATOR      = get_config('waterflow.maintenance.disable_aerator',       False)
+DISABLE_FAN          = get_config('waterflow.maintenance.disable_fan',           False)
 # ============================================================================
 
 # ============================================================================
@@ -131,6 +125,7 @@ def _load_thresholds():
     global WATER_TEMP_HOT_C, WATER_TEMP_WARM_C, WATER_TEMP_MODERATE_C
     global FAN_TEMP_ON_C, FAN_TEMP_OFF_C, FAN_TEMP_FORCE_ON_C
     global FAN_HUMIDITY_ON, FAN_HUMIDITY_OFF, FAN_MIN_TOGGLE_INTERVAL
+    global SMART_COOLING_MIN_C, SMART_HEATING_MAX_C
     global HUMIDITY_WARNING, HUMIDITY_CRITICAL, HUMIDITY_EMERGENCY
     global BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE, BATTERY_THRESHOLD_NORMAL
     global BATTERY_SKIP_PUMP_TEST_BELOW
@@ -159,6 +154,8 @@ def _load_thresholds():
     FAN_HUMIDITY_ON       = get_config('waterflow.fan.humidity_on_pct',            80)
     FAN_HUMIDITY_OFF      = get_config('waterflow.fan.humidity_off_pct',           70)
     FAN_MIN_TOGGLE_INTERVAL = get_config('waterflow.fan.min_toggle_interval_seconds', 120)
+    SMART_COOLING_MIN_C   = get_config('waterflow.fan.smart_cooling_min_c',  21.1)
+    SMART_HEATING_MAX_C   = get_config('waterflow.fan.smart_heating_max_c',  26.7)
 
     # Humidity alerts
     HUMIDITY_WARNING  = get_config('waterflow.humidity_alerts.warning_pct',   80)
@@ -503,7 +500,7 @@ _TREND_1H_READINGS   = 360  # 360s / 10s = 36 readings for 1-hour average
 _flow_trend_history = deque(maxlen=_TREND_HISTORY_SIZE)   # 24h of inlet flow readings
 _flow_trend_1h = deque(maxlen=_TREND_1H_READINGS)         # 1h of inlet flow readings
 
-FLOW_TREND_DROP_PCT = 0.20   # 20% drop triggers degradation warning
+FLOW_TREND_DROP_PCT = get_config('waterflow.flow.trend_drop_pct', 0.20)
 
 
 def update_flow_trend(flow_inlet_lpm):
@@ -1175,14 +1172,14 @@ def control_ventilation_fan(conditions, temps):
     if 'outdoor' in temps:
         outdoor_c = temps['outdoor']
 
-        if outdoor_c < enclosure_temp_c - OUTDOOR_COOLING_DELTA_C and enclosure_temp_c > 21.1:
+        if outdoor_c < enclosure_temp_c - OUTDOOR_COOLING_DELTA_C and enclosure_temp_c > SMART_COOLING_MIN_C:
             should_run = True
             if not fan_running:
                 logging.info(
                     f"Smart enclosure cooling: outdoor {outdoor_c:.1f}C < "
                     f"enclosure {enclosure_temp_c:.1f}C"
                 )
-        elif outdoor_c > enclosure_temp_c + OUTDOOR_HEAT_DELTA_C and enclosure_temp_c < 26.7:
+        elif outdoor_c > enclosure_temp_c + OUTDOOR_HEAT_DELTA_C and enclosure_temp_c < SMART_HEATING_MAX_C:
             if enclosure_temp_c < FAN_TEMP_FORCE_ON_C:
                 should_run = False
                 if fan_running:
@@ -1618,7 +1615,7 @@ def save_state():
 # PROMETHEUS METRICS
 # ============================================================================
 
-MAX_CONSECUTIVE_FAILURES = 5
+MAX_CONSECUTIVE_FAILURES = get_config('waterflow.health.max_consecutive_failures', 5)
 
 
 def write_prometheus_metrics(temps=None, conditions=None):
