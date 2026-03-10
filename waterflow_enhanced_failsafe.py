@@ -111,11 +111,10 @@ DS18B20_BASE_DIR    = '/sys/bus/w1/devices/'
 DS18B20_DEVICE_PREFIX = '28-'
 
 # DS18B20 Sensor ID Mapping - loaded from config, keyed by hardware ID
-DS18B20_SENSOR_MAP = get_config('waterflow.temperature.sensor_map', {
-    '28-000000b18b1c': 'reservoir',
-    '28-000000baada8': 'nft_drain',
-    '28-000000b26508': 'outdoor',
-})
+# Configure in config.json under waterflow.temperature.sensor_map
+# e.g. {"28-xxxxxxxxxxxx": "reservoir", "28-xxxxxxxxxxxx": "nft_drain"}
+# If not configured, sensors are assigned by discovery order (unreliable)
+DS18B20_SENSOR_MAP = get_config('waterflow.temperature.sensor_map', {})
 
 # BME280 I2C Configuration
 BME280_I2C_ADDRESS = get_config('waterflow.bme280.i2c_address', 0x76)
