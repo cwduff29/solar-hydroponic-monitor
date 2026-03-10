@@ -64,12 +64,26 @@ fi
 
 # --- [1/13] Python dependencies ---
 echo "[1/13] Installing Python packages..."
-# Remove old RPi.GPIO if installed via pip — it breaks edge detection on newer kernels
-# (gpiochip512). rpi-lgpio is the drop-in replacement that uses lgpio instead of sysfs.
-pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
-pip3 uninstall -y RPi.GPIO 2>/dev/null || true
-pip3 install renogymodbus rpi-lgpio smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
-pip3 install renogymodbus rpi-lgpio smbus2 RPi.bme280
+
+# Detect which GPIO library to use based on the kernel's GPIO chip numbering.
+# Older kernels (Pi OS Bullseye and earlier) expose gpiochip0 and work with RPi.GPIO.
+# Newer kernels (Pi OS Bookworm+) expose gpiochip512+ and require rpi-lgpio, which is
+# a drop-in RPi.GPIO replacement backed by lgpio instead of the broken sysfs interface.
+GPIO_PKG="RPi.GPIO"
+GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1)
+GPIO_CHIP_NUM=${GPIO_CHIP#gpiochip}
+if [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
+    echo "      Detected new-style GPIO chip ($GPIO_CHIP) — using rpi-lgpio"
+    GPIO_PKG="rpi-lgpio"
+    # Remove pip-installed RPi.GPIO if present; it shadows rpi-lgpio and breaks edge detection
+    pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
+    pip3 uninstall -y RPi.GPIO 2>/dev/null || true
+else
+    echo "      Detected legacy GPIO chip (${GPIO_CHIP:-unknown}) — using RPi.GPIO"
+fi
+
+pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
+pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280
 echo "      Done."
 
 # --- [2/13] Prometheus node_exporter ---
