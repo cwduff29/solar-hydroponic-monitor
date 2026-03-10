@@ -64,8 +64,12 @@ fi
 
 # --- [1/13] Python dependencies ---
 echo "[1/13] Installing Python packages..."
-pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
-pip3 install renogymodbus RPi.GPIO smbus2 RPi.bme280
+# Remove old RPi.GPIO if installed via pip — it breaks edge detection on newer kernels
+# (gpiochip512). rpi-lgpio is the drop-in replacement that uses lgpio instead of sysfs.
+pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
+pip3 uninstall -y RPi.GPIO 2>/dev/null || true
+pip3 install renogymodbus rpi-lgpio smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
+pip3 install renogymodbus rpi-lgpio smbus2 RPi.bme280
 echo "      Done."
 
 # --- [2/13] Prometheus node_exporter ---
