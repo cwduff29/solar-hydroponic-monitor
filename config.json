@@ -103,6 +103,16 @@
       "recovery_wait_seconds": 90,
       "cycle_max_attempts": 2
     },
+    "thresholds": {
+      "max_temp_c":           80.0,
+      "min_temp_c":          -40.0,
+      "max_humidity_pct":    100.0,
+      "min_humidity_pct":      0.0,
+      "max_pressure_hpa":   1084.0,
+      "min_pressure_hpa":    870.0,
+      "max_flow_lpm":         10.0,
+      "max_spike_multiplier":  5.0
+    },
     "maintenance": {
       "disable_emails": false,
       "disable_pump_testing": false,

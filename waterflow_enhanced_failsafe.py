@@ -135,6 +135,10 @@ def _load_thresholds():
     global PUMP_CYCLE_PAUSE, PUMP_RECOVERY_WAIT, PUMP_CYCLE_MAX_ATTEMPTS
     global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
+    global MAX_TEMP_C, MIN_TEMP_C
+    global MAX_HUMIDITY_PCT, MIN_HUMIDITY_PCT
+    global MAX_PRESSURE_HPA, MIN_PRESSURE_HPA
+    global MAX_FLOW_LPM, MAX_SPIKE_MULTIPLIER
 
     # Temperature thresholds (all in degC internally)
     NFT_RETURN_EXTREME_TEMP_C             = get_config('waterflow.temperature.nft_extreme_temp_c',                29.4)
@@ -188,6 +192,16 @@ def _load_thresholds():
     # Alert timing
     EMAIL_COOLDOWN_MINUTES = get_config('alerts.email_cooldown_minutes', 60)
     EMAIL_REMINDER_HOURS   = get_config('alerts.email_reminder_hours',   12)
+
+    # Sensor validation bounds
+    MAX_TEMP_C           = get_config('waterflow.thresholds.max_temp_c',           80.0)
+    MIN_TEMP_C           = get_config('waterflow.thresholds.min_temp_c',          -40.0)
+    MAX_HUMIDITY_PCT     = get_config('waterflow.thresholds.max_humidity_pct',    100.0)
+    MIN_HUMIDITY_PCT     = get_config('waterflow.thresholds.min_humidity_pct',      0.0)
+    MAX_PRESSURE_HPA     = get_config('waterflow.thresholds.max_pressure_hpa',   1084.0)
+    MIN_PRESSURE_HPA     = get_config('waterflow.thresholds.min_pressure_hpa',    870.0)
+    MAX_FLOW_LPM         = get_config('waterflow.thresholds.max_flow_lpm',         10.0)
+    MAX_SPIKE_MULTIPLIER = get_config('waterflow.thresholds.max_spike_multiplier',  5.0)
 
 _load_thresholds()
 
@@ -535,6 +549,24 @@ def get_flow_trend_metrics():
     return (avg_24h, avg_1h, degraded)
 
 
+def validate_flow_reading(flow_inlet, flow_outlet):
+    """
+    Validate raw flow readings against physical bounds and spike detection.
+    Returns (is_valid, list_of_issues). Mirrors renogy.validate_metrics().
+    """
+    issues = []
+    if flow_inlet > MAX_FLOW_LPM:
+        issues.append(f"Inlet flow out of range: {flow_inlet:.3f} L/min (max {MAX_FLOW_LPM})")
+    if flow_outlet > MAX_FLOW_LPM:
+        issues.append(f"Outlet flow out of range: {flow_outlet:.3f} L/min (max {MAX_FLOW_LPM})")
+    # Spike detection — skip on startup when smoothed == 0 (no baseline yet)
+    if smoothed_flow_inlet > 0 and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
+        issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
+    if smoothed_flow_outlet > 0 and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
+        issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
+    return (len(issues) == 0, issues)
+
+
 # ============================================================================
 # DAILY FLOW VOLUME TRACKING (#15)
 # ============================================================================
@@ -663,6 +695,13 @@ def monitor_flow():
         duration = FLOW_MEASUREMENT_DURATION
         flow_inlet  = snapshot_inlet  / (FLOW_CALIBRATION_FACTOR * duration)
         flow_outlet = snapshot_outlet / (FLOW_CALIBRATION_FACTOR * duration)
+
+        # Validate flow readings before using them
+        is_valid, validation_issues = validate_flow_reading(flow_inlet, flow_outlet)
+        if not is_valid:
+            for issue in validation_issues:
+                logging.warning(f"[FLOW VALIDATION] Discarding faulty reading: {issue}")
+            return  # Skip accumulation, smoothing, and alert checks for this cycle
 
         # Accumulate daily volume (#15)
         accumulate_flow_volume(flow_inlet)
@@ -866,6 +905,18 @@ def read_temp_sensor(device_file):
         equals_pos = lines[1].find('t=')
         if equals_pos != -1:
             temp_c = float(lines[1][equals_pos+2:]) / 1000.0
+
+            # Known DS18B20 hardware failure values (not configurable — hardware-defined)
+            DS18B20_BAD_VALUES = {85.0, -127.0}
+            if temp_c in DS18B20_BAD_VALUES:
+                logging.warning(f"DS18B20 returned known-bad value {temp_c}°C from {device_file}")
+                return None
+
+            # Range check
+            if temp_c > MAX_TEMP_C or temp_c < MIN_TEMP_C:
+                logging.warning(f"DS18B20 temperature out of range: {temp_c:.1f}°C from {device_file}")
+                return None
+
             return temp_c
     except Exception as e:
         logging.error(f"Failed to read temperature sensor {device_file}: {e}")
@@ -956,6 +1007,20 @@ def read_enclosure_conditions():
             temp_f = temp_c * 9.0 / 5.0 + 32.0
             humidity = data.humidity
             pressure = data.pressure
+
+            # Validate BME280 readings before using them
+            bme_issues = []
+            if temp_c > MAX_TEMP_C or temp_c < MIN_TEMP_C:
+                bme_issues.append(f"BME280 temperature out of range: {temp_c:.1f}°C")
+            if humidity > MAX_HUMIDITY_PCT or humidity < MIN_HUMIDITY_PCT:
+                bme_issues.append(f"BME280 humidity out of range: {humidity:.1f}%")
+            if pressure > MAX_PRESSURE_HPA or pressure < MIN_PRESSURE_HPA:
+                bme_issues.append(f"BME280 pressure out of range: {pressure:.1f} hPa")
+            if bme_issues:
+                for issue in bme_issues:
+                    logging.warning(f"[BME280 VALIDATION] {issue}")
+                sensors_available['bme280'] = False
+                return None
 
             a = 17.27
             b = 237.7
