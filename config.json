@@ -6,7 +6,7 @@
     "battery_nominal_voltage": 12.8,
     "thresholds": {
       "low_battery_voltage": 12.8,
-      "high_controller_temp_c": 45.0,
+      "high_controller_temp_c": 40.0,
       "high_battery_temp_c": 50.0,
       "low_battery_temp_c": 0.0,
       "low_battery_soc_pct": 20.0,
@@ -70,14 +70,15 @@
       "i2c_address": 118
     },
     "fan": {
-      "temp_on_c": 35.0,
-      "temp_off_c": 29.4,
-      "temp_force_on_c": 43.3,
+      "temp_on_c": 26.7,
+      "temp_off_c": 23.9,
+      "temp_force_on_c": 35.0,
       "humidity_on_pct": 80,
       "humidity_off_pct": 70,
       "min_toggle_interval_seconds": 120,
       "smart_cooling_min_c": 21.1,
-      "smart_heating_max_c": 26.7
+      "smart_heating_max_c": 26.7,
+      "use_renogy_temp_as_enclosure_fallback": true
     },
     "humidity_alerts": {
       "warning_pct": 80,
@@ -88,7 +89,17 @@
       "on_duration_seconds": 360,
       "off_duration_seconds": 1440,
       "reduced_on_duration_seconds": 240,
-      "reduced_off_duration_seconds": 2160
+      "reduced_off_duration_seconds": 2160,
+      "temp_tiers": {
+        "hot_on_seconds": 420,
+        "hot_off_seconds": 1380,
+        "warm_on_seconds": 360,
+        "warm_off_seconds": 1440,
+        "moderate_on_seconds": 300,
+        "moderate_off_seconds": 1800,
+        "cool_on_seconds": 240,
+        "cool_off_seconds": 2160
+      }
     },
     "battery_load_shedding": {
       "disable_threshold_pct": 30,
@@ -127,7 +138,8 @@
   "alerts": {
     "email_cooldown_minutes": 60,
     "email_reminder_hours": 12,
-    "daily_summary_hour": 7
+    "daily_summary_hour": 7,
+    "summary_interval_days": 7
   },
   "paths": {
     "renogy_prom": "/ramdisk/Renogy.prom",

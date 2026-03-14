@@ -228,9 +228,10 @@ class AlertManager:
             except Exception as e:
                 logging.error(f"Failed to save alert state to ramdisk {self._ramdisk_path}: {e}")
 
-            # Write persistent if any alert is active
-            any_active = any(s['active'] for s in self._state.values())
-            if any_active and self._persistent_path:
+            # Always write persistent file so that a cleared-alert state survives
+            # a ramdisk loss (reboot). Without this, stale "active" flags in the
+            # on-disk file would suppress re-alerting after restart.
+            if self._persistent_path:
                 try:
                     os.makedirs(os.path.dirname(self._persistent_path), exist_ok=True)
                     with open(self._persistent_path, 'w') as f:
@@ -466,17 +467,18 @@ class DailySummary:
             s = self._stats.get(key)
             return s['count'] if s else 0
 
-    def should_send(self, hour=7):
+    def should_send(self, hour=7, interval_days=1):
         """
-        Return True once per day when the current hour matches `hour`.
-        Resets automatically at midnight (i.e., once the date changes,
-        a new send becomes eligible at the next matching hour).
+        Return True once per interval when the current hour matches `hour`.
+        `interval_days` controls how many days must elapse since the last send.
         """
         now = datetime.now()
         today = now.date()
         with self._lock:
-            if self._last_sent_date == today:
-                return False
+            if self._last_sent_date is not None:
+                days_since = (today - self._last_sent_date).days
+                if days_since < interval_days:
+                    return False
             if now.hour == hour:
                 return True
             return False
