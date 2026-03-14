@@ -131,6 +131,10 @@ def _load_thresholds():
     global BATTERY_SKIP_PUMP_TEST_BELOW
     global AERATION_ON_DURATION, AERATION_OFF_DURATION
     global AERATION_ON_DURATION_REDUCED, AERATION_OFF_DURATION_REDUCED
+    global AERATION_TIER_HOT_ON, AERATION_TIER_HOT_OFF
+    global AERATION_TIER_WARM_ON, AERATION_TIER_WARM_OFF
+    global AERATION_TIER_MODERATE_ON, AERATION_TIER_MODERATE_OFF
+    global AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
     global PUMP_TEST_INTERVAL, PUMP_TEST_DURATION
     global PUMP_CYCLE_PAUSE, PUMP_RECOVERY_WAIT, PUMP_CYCLE_MAX_ATTEMPTS
     global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT
@@ -178,6 +182,16 @@ def _load_thresholds():
     AERATION_ON_DURATION_REDUCED = get_config('waterflow.aeration.reduced_on_duration_seconds',  240)
     AERATION_OFF_DURATION_REDUCED = get_config('waterflow.aeration.reduced_off_duration_seconds', 2160)
 
+    # Temperature-tier aeration durations (on/off seconds for each water temp band)
+    AERATION_TIER_HOT_ON       = get_config('waterflow.aeration.temp_tiers.hot_on_seconds',      420)
+    AERATION_TIER_HOT_OFF      = get_config('waterflow.aeration.temp_tiers.hot_off_seconds',     1380)
+    AERATION_TIER_WARM_ON      = get_config('waterflow.aeration.temp_tiers.warm_on_seconds',     360)
+    AERATION_TIER_WARM_OFF     = get_config('waterflow.aeration.temp_tiers.warm_off_seconds',    1440)
+    AERATION_TIER_MODERATE_ON  = get_config('waterflow.aeration.temp_tiers.moderate_on_seconds', 300)
+    AERATION_TIER_MODERATE_OFF = get_config('waterflow.aeration.temp_tiers.moderate_off_seconds',1800)
+    AERATION_TIER_COOL_ON      = get_config('waterflow.aeration.temp_tiers.cool_on_seconds',     240)
+    AERATION_TIER_COOL_OFF     = get_config('waterflow.aeration.temp_tiers.cool_off_seconds',    2160)
+
     # Pump testing
     PUMP_TEST_INTERVAL    = get_config('waterflow.pump.test_interval_seconds',   172800)
     PUMP_TEST_DURATION    = get_config('waterflow.pump.test_duration_seconds',       60)
@@ -214,6 +228,7 @@ LOG_FILE_PATH    = get_config('paths.waterflow_log',         '/var/log/waterflow
 
 # Daily summary hour
 DAILY_SUMMARY_HOUR = get_config('alerts.daily_summary_hour', 7)
+SUMMARY_INTERVAL_DAYS = get_config('alerts.summary_interval_days', 7)
 
 # ============================================================================
 # TEMPERATURE MONITORING (3-Sensor NFT System)
@@ -314,6 +329,7 @@ leak_alert_sent = False
 aeration_state = False
 last_aeration_toggle = time.time()
 aeration_mode = "normal"
+_aeration_soc_tier = None   # Track SOC tier to detect tier changes
 
 # Fan state (start OFF, let control_ventilation_fan() turn it on based on temperature)
 fan_running = False
@@ -321,6 +337,7 @@ fan_last_toggle = time.time()
 
 # Battery state
 battery_soc = 100.0
+renogy_controller_temp_c = None  # Controller temp from Renogy.prom (BME280 fallback)
 
 # Pump testing
 last_pump_test = 0
@@ -506,9 +523,9 @@ def check_flow_measurement():
 # FLOW TREND ANALYSIS (#12)
 # ============================================================================
 
-# 144 readings × 10s = 24 hours of history
-_TREND_HISTORY_SIZE = 144
-_TREND_1H_READINGS   = 360  # 360s / 10s = 36 readings for 1-hour average
+# 8640 readings × 10s = 86400s = 24 hours of history
+_TREND_HISTORY_SIZE = 8640
+_TREND_1H_READINGS   = 360  # 360 readings × 10s = 3600s = 1-hour average
 
 # Deque automatically drops oldest when full
 _flow_trend_history = deque(maxlen=_TREND_HISTORY_SIZE)   # 24h of inlet flow readings
@@ -628,15 +645,16 @@ def _fmt(v, spec='.1f'):
 
 def check_daily_summary():
     """Send daily summary email if due."""
-    if not daily_summary.should_send(DAILY_SUMMARY_HOUR):
+    if not daily_summary.should_send(DAILY_SUMMARY_HOUR, SUMMARY_INTERVAL_DAYS):
         return
 
     active_alert_count = sum(
         1 for s in alert_manager.all_states().values() if s.get('active', False)
     )
 
+    summary_label = "Daily" if SUMMARY_INTERVAL_DAYS == 1 else f"{SUMMARY_INTERVAL_DAYS}-Day"
     body = (
-        f"Waterflow Monitor Daily Summary\n"
+        f"Waterflow Monitor {summary_label} Summary\n"
         f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Generated: {datetime.now().strftime('%H:%M:%S')}\n\n"
         f"Water Flow:\n"
@@ -668,7 +686,7 @@ def check_daily_summary():
                 since = s.get('first_detected', 'unknown')
                 body += f"  - {atype} (since {since})\n"
 
-    if send_email_alert(f"Daily Summary: Waterflow {datetime.now().strftime('%Y-%m-%d')}", body):
+    if send_email_alert(f"{summary_label} Summary: Waterflow {datetime.now().strftime('%Y-%m-%d')}", body):
         daily_summary.mark_sent()
 
 
@@ -952,17 +970,10 @@ def read_all_temperatures():
                     elif logical_name == 'enclosure':
                         sensors_available['enclosure_temp'] = True
     else:
-        logging.warning("DS18B20_SENSOR_MAP not configured - using discovery order (unreliable!)")
-        for i, sensor in enumerate(sensors):
-            temp_c = read_temp_sensor(sensor)
-            if temp_c is not None:
-                if i == 0:
-                    temps['water'] = temp_c
-                    temps['reservoir'] = temp_c
-                    sensors_available['water_temp'] = True
-                elif i == 1:
-                    temps['enclosure'] = temp_c
-                    sensors_available['enclosure_temp'] = True
+        logging.warning(
+            "DS18B20_SENSOR_MAP not configured — skipping unmapped sensors. "
+            "Configure sensor_map in config.json to assign sensor roles."
+        )
 
     if 'water' not in temps and 'reservoir' not in temps:
         sensors_available['water_temp'] = False
@@ -1048,17 +1059,39 @@ def read_enclosure_conditions():
 # BATTERY DATA
 # ============================================================================
 
+def _alert_battery_data_unavailable(reason):
+    """Send a one-time alert when battery SOC data is unavailable."""
+    alert_type = 'battery_data_unavailable'
+    should_send, alert_reason = alert_manager.should_send(alert_type)
+    if should_send:
+        logging.warning(f"Battery data unavailable: {reason}")
+        send_email_alert(
+            "Warning: Battery Data Unavailable",
+            f"Battery SOC data is unavailable — operating without SOC-based load management.\n\n"
+            f"Reason: {reason}\n"
+            f"Alert reason: {alert_reason}\n"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"Aeration will continue at normal schedule regardless of battery state.\n"
+            f"Check that renogy.py is running and connected."
+        )
+        alert_manager.mark_sent(alert_type)
+    else:
+        logging.warning(f"Battery data unavailable: {reason}")
+
+
 def read_battery_soc():
-    """Read battery SOC from Renogy data file and check monitor health"""
-    global battery_soc, renogy_monitor_healthy
+    """Read battery SOC and controller temperature from Renogy data file and check monitor health"""
+    global battery_soc, renogy_monitor_healthy, renogy_controller_temp_c
 
     try:
         if not os.path.exists(BATTERY_DATA_FILE):
+            _alert_battery_data_unavailable("battery data file not found (is renogy.py running?)")
             return None
 
         file_age = time.time() - os.path.getmtime(BATTERY_DATA_FILE)
         if file_age > BATTERY_DATA_TIMEOUT:
             logging.warning(f"Battery data file is stale ({file_age:.0f}s old)")
+            _alert_battery_data_unavailable(f"battery data file is stale ({file_age:.0f}s old)")
             return None
 
         renogy_healthy_found = False
@@ -1084,10 +1117,21 @@ def read_battery_soc():
                         except ValueError:
                             continue
 
+                if line.strip().startswith('controller_temperature{'):
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            renogy_controller_temp_c = float(parts[-1])
+                        except ValueError:
+                            pass
+
         if renogy_healthy_found and not renogy_monitor_healthy:
             logging.warning("Renogy monitor reports unhealthy status - battery data may be unreliable")
 
-        return battery_soc if soc_found else None
+        if soc_found:
+            alert_manager.clear('battery_data_unavailable')
+            return battery_soc
+        return None
 
     except Exception as e:
         logging.error(f"Failed to read battery SOC: {e}")
@@ -1098,20 +1142,20 @@ def read_battery_soc():
 # ============================================================================
 
 def get_aeration_by_temperature_c(water_temp_c):
-    """Get aeration timing based on water temperature (degrees C)."""
+    """Get aeration on/off timing (seconds) based on water temperature (degrees C)."""
     if water_temp_c > WATER_TEMP_HOT_C:
-        return 420, 1380
+        return AERATION_TIER_HOT_ON, AERATION_TIER_HOT_OFF
     elif water_temp_c > WATER_TEMP_WARM_C:
-        return 360, 1440
+        return AERATION_TIER_WARM_ON, AERATION_TIER_WARM_OFF
     elif water_temp_c > WATER_TEMP_MODERATE_C:
-        return 300, 1800
+        return AERATION_TIER_MODERATE_ON, AERATION_TIER_MODERATE_OFF
     else:
-        return 240, 2160
+        return AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
 
 
 def control_aeration():
     """Control aeration pump with battery-based load shedding"""
-    global aeration_state, last_aeration_toggle, aeration_mode
+    global aeration_state, last_aeration_toggle, aeration_mode, _aeration_soc_tier
 
     if DISABLE_AERATOR:
         set_aeration(False)
@@ -1128,14 +1172,28 @@ def control_aeration():
         mode = "disabled"
         on_duration = 0
         off_duration = 9999999
+        new_tier = "disabled"
     elif soc is not None and soc < BATTERY_THRESHOLD_REDUCE:
         mode = "reduced"
         on_duration = AERATION_ON_DURATION_REDUCED
         off_duration = AERATION_OFF_DURATION_REDUCED
+        new_tier = "reduced"
     else:
         mode = "normal"
         on_duration = AERATION_ON_DURATION
         off_duration = AERATION_OFF_DURATION
+        new_tier = "normal"
+
+    # Reset the aeration timer when SOC tier changes so the new schedule starts
+    # cleanly rather than inheriting a mid-cycle offset from the old schedule.
+    if new_tier != _aeration_soc_tier:
+        if _aeration_soc_tier is not None:
+            logging.warning(
+                f"Aeration SOC tier changed: {_aeration_soc_tier} → {new_tier} "
+                f"(SOC={soc}%) — resetting aeration timer"
+            )
+        _aeration_soc_tier = new_tier
+        last_aeration_toggle = time.time()
 
     # Temperature-based adjustment (all thresholds in C now - #13)
     water_key = 'water' if 'water' in temps else 'reservoir' if 'reservoir' in temps else None
@@ -1208,18 +1266,38 @@ def control_ventilation_fan(conditions, temps):
         enclosure_temp_c = temps['enclosure']
 
     if enclosure_temp_c is None:
-        if fan_running:
-            set_fan(False)
-            fan_running = False
-        return
+        # Fallback: use Renogy controller temperature if configured and available.
+        # The MPPT chip runs 5–15°C above enclosure ambient under load, so this
+        # causes the fan to run more conservatively (earlier ON) — the safe direction.
+        if (get_config('waterflow.fan.use_renogy_temp_as_enclosure_fallback', False)
+                and renogy_controller_temp_c is not None):
+            enclosure_temp_c = renogy_controller_temp_c
+            logging.warning(
+                f"BME280 and enclosure DS18B20 unavailable — using Renogy controller "
+                f"temperature ({renogy_controller_temp_c:.1f}°C) as enclosure proxy"
+            )
+        else:
+            if fan_running:
+                set_fan(False)
+                fan_running = False
+            return
 
     if time.time() - fan_last_toggle < FAN_MIN_TOGGLE_INTERVAL:
         return
 
+    # Battery SOC load shedding: at critically low SOC only run fan if above
+    # force-on threshold (thermal emergency). This mirrors aeration load shedding.
+    soc = read_battery_soc()
+    soc_critical = (soc is not None and soc < BATTERY_THRESHOLD_DISABLE)
+
     should_run = False
 
     if enclosure_temp_c >= FAN_TEMP_FORCE_ON_C:
+        # Thermal emergency: run fan regardless of SOC
         should_run = True
+    elif soc_critical:
+        # Battery critically low and temp below force-on — suppress fan
+        should_run = False
     elif enclosure_temp_c >= FAN_TEMP_ON_C:
         should_run = True
     elif enclosure_temp_c <= FAN_TEMP_OFF_C:
@@ -1227,7 +1305,7 @@ def control_ventilation_fan(conditions, temps):
     else:
         should_run = fan_running  # Hysteresis
 
-    if humidity is not None:
+    if humidity is not None and not soc_critical:
         if humidity >= FAN_HUMIDITY_ON:
             should_run = True
         elif humidity <= FAN_HUMIDITY_OFF and enclosure_temp_c < FAN_TEMP_ON_C:
@@ -1245,7 +1323,7 @@ def control_ventilation_fan(conditions, temps):
                     f"enclosure {enclosure_temp_c:.1f}C"
                 )
         elif outdoor_c > enclosure_temp_c + OUTDOOR_HEAT_DELTA_C and enclosure_temp_c < SMART_HEATING_MAX_C:
-            if enclosure_temp_c < FAN_TEMP_FORCE_ON_C:
+            if enclosure_temp_c < FAN_TEMP_FORCE_ON_C and not soc_critical:
                 should_run = False
                 if fan_running:
                     logging.info(
@@ -1578,6 +1656,7 @@ def attempt_pump_recovery():
     time.sleep(PUMP_CYCLE_PAUSE)
     set_backup_pump(True)
     backup_pump_active = True
+    recovery_attempted = False  # Allow one recovery attempt on the backup pump
 
     time.sleep(PUMP_RECOVERY_WAIT)
 

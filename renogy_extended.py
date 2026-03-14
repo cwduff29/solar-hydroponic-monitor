@@ -51,7 +51,7 @@ class RenogyRoverExtended(RenogyChargeController):
         # Batch-read cache: populated by batch_read(), consumed by individual getters
         self._batch_cache = {}           # {register_address: value}
         self._batch_timestamp = 0.0      # epoch seconds of last batch_read()
-        self._batch_ttl = 12.0           # seconds before cache is considered stale
+        self._batch_ttl = 30.0           # seconds before cache is considered stale
 
     # ========================================================================
     # RETRY INFRASTRUCTURE

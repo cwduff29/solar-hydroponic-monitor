@@ -254,6 +254,7 @@ watchdog = None
 
 daily_summary = DailySummary()
 DAILY_SUMMARY_HOUR = get_config('alerts.daily_summary_hour', 7)
+SUMMARY_INTERVAL_DAYS = get_config('alerts.summary_interval_days', 7)
 
 # ============================================================================
 # EMAIL HELPERS
@@ -317,12 +318,12 @@ def validate_metrics(metrics):
     if metrics["controller_temperature"] is not None:
         if (metrics["controller_temperature"] > MAX_REASONABLE_TEMPERATURE or
                 metrics["controller_temperature"] < MIN_REASONABLE_TEMPERATURE):
-            issues.append(f"Controller temp out of range: {metrics['controller_temperature']:.1f}C")
+            issues.append(f"Controller temp out of range: {_c_to_f(metrics['controller_temperature']):.1f}°F")
 
     if metrics["battery_temperature"] is not None:
         if (metrics["battery_temperature"] > MAX_REASONABLE_TEMPERATURE or
                 metrics["battery_temperature"] < MIN_REASONABLE_TEMPERATURE):
-            issues.append(f"Battery temp out of range: {metrics['battery_temperature']:.1f}C")
+            issues.append(f"Battery temp out of range: {_c_to_f(metrics['battery_temperature']):.1f}°F")
 
     if metrics["solar_input_current"] is not None:
         if metrics["solar_input_current"] > MAX_REASONABLE_CURRENT:
@@ -343,8 +344,41 @@ def validate_metrics(metrics):
 # DATA COLLECTION
 # ============================================================================
 
-# Track previous over-discharge count
+# Track previous over-discharge count — persisted across restarts so events
+# that occur while this script is down are not silently missed.
 previous_over_discharge_count = None
+
+_COUNTERS_FILE = os.path.join(os.path.dirname(PERSISTENT_STATE_FILE), 'renogy_counters.json')
+
+
+def _load_persisted_counters():
+    """Load persistent counter values (e.g. over-discharge count) at startup."""
+    global previous_over_discharge_count
+    try:
+        if os.path.exists(_COUNTERS_FILE):
+            with open(_COUNTERS_FILE, 'r') as f:
+                data = json.load(f)
+            previous_over_discharge_count = data.get('previous_over_discharge_count')
+            logging.info(
+                f"Loaded persisted over-discharge count: {previous_over_discharge_count}"
+            )
+    except Exception as e:
+        logging.warning(f"Could not load persisted counters from {_COUNTERS_FILE}: {e}")
+
+
+def _save_persisted_counters():
+    """Save persistent counter values so they survive restarts."""
+    try:
+        os.makedirs(os.path.dirname(_COUNTERS_FILE), exist_ok=True)
+        tmp = _COUNTERS_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump({'previous_over_discharge_count': previous_over_discharge_count}, f)
+        os.rename(tmp, _COUNTERS_FILE)
+    except Exception as e:
+        logging.warning(f"Could not save persisted counters to {_COUNTERS_FILE}: {e}")
+
+
+_load_persisted_counters()
 
 def read_rover_metrics():
     """Read metrics from Renogy Rover with enhanced error handling and batch reads."""
@@ -364,6 +398,7 @@ def read_rover_metrics():
                 new_over_discharge_event = True
         if current_over_discharge_count is not None:
             previous_over_discharge_count = current_over_discharge_count
+            _save_persisted_counters()
 
         battery_soc = rover.get_battery_state_of_charge()
         battery_capacity_ah_remaining = (
@@ -443,24 +478,37 @@ def update_daily_summary(metrics):
         daily_summary.update('battery_soc', metrics['battery_soc'])
     if metrics.get('solar_input_power') is not None:
         daily_summary.update('solar_power_w', metrics['solar_input_power'])
+    if metrics.get('controller_temperature') is not None:
+        daily_summary.update('controller_temp_c', metrics['controller_temperature'])
+    if metrics.get('battery_temperature') is not None:
+        daily_summary.update('battery_temp_c', metrics['battery_temperature'])
 
 def check_daily_summary():
     """Send daily summary email if due."""
-    if not daily_summary.should_send(DAILY_SUMMARY_HOUR):
+    if not daily_summary.should_send(DAILY_SUMMARY_HOUR, SUMMARY_INTERVAL_DAYS):
         return
 
     active_alert_count = sum(
         1 for s in alert_manager.all_states().values() if s.get('active', False)
     )
 
-    solar_kwh_today  = daily_summary.get_sum('solar_kwh')
-    soc_min          = daily_summary.get_min('battery_soc')
-    soc_max          = daily_summary.get_max('battery_soc')
-    soc_avg          = daily_summary.get_avg('battery_soc')
-    solar_power_max  = daily_summary.get_max('solar_power_w')
+    solar_kwh_today    = daily_summary.get_sum('solar_kwh')
+    soc_min            = daily_summary.get_min('battery_soc')
+    soc_max            = daily_summary.get_max('battery_soc')
+    soc_avg            = daily_summary.get_avg('battery_soc')
+    solar_power_max    = daily_summary.get_max('solar_power_w')
+    ctrl_temp_min      = daily_summary.get_min('controller_temp_c')
+    ctrl_temp_max      = daily_summary.get_max('controller_temp_c')
+    batt_temp_min      = daily_summary.get_min('battery_temp_c')
+    batt_temp_max      = daily_summary.get_max('battery_temp_c')
 
     def _fmt(v, fmt='.1f'):
         return f"{v:{fmt}}" if v is not None else "N/A"
+
+    def _fmt_temp(c):
+        if c is None:
+            return "N/A"
+        return f"{c:.1f}°C ({c * 9/5 + 32:.1f}°F)"
 
     body = (
         f"Renogy Solar Daily Summary\n"
@@ -473,6 +521,9 @@ def check_daily_summary():
         f"  SOC min:  {_fmt(soc_min)}%\n"
         f"  SOC max:  {_fmt(soc_max)}%\n"
         f"  SOC avg:  {_fmt(soc_avg)}%\n\n"
+        f"Temperatures:\n"
+        f"  Controller min: {_fmt_temp(ctrl_temp_min)}  max: {_fmt_temp(ctrl_temp_max)}\n"
+        f"  Battery    min: {_fmt_temp(batt_temp_min)}  max: {_fmt_temp(batt_temp_max)}\n\n"
         f"Active alerts: {active_alert_count}\n"
     )
     if active_alert_count > 0:
@@ -482,12 +533,18 @@ def check_daily_summary():
                 since = s.get('first_detected', 'unknown')
                 body += f"  - {atype} (since {since})\n"
 
-    if send_email_alert(f"Daily Summary: Renogy {datetime.now().strftime('%Y-%m-%d')}", body):
+    summary_label = "Daily" if SUMMARY_INTERVAL_DAYS == 1 else f"{SUMMARY_INTERVAL_DAYS}-Day"
+    if send_email_alert(f"{summary_label} Summary: Renogy {datetime.now().strftime('%Y-%m-%d')}", body):
         daily_summary.mark_sent()
 
 # ============================================================================
 # ALERT CHECKING
 # ============================================================================
+
+def _c_to_f(c):
+    """Convert Celsius to Fahrenheit."""
+    return c * 9 / 5 + 32
+
 
 def check_critical_conditions(metrics):
     """Check for critical conditions and send alerts (with throttling)"""
@@ -561,7 +618,7 @@ def check_critical_conditions(metrics):
                 f"CRITICAL HARDWARE FAULT(S) DETECTED:\n\n{faults_text}\n\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Solar power: {metrics['solar_input_power']}W\n"
-                f"Controller temp: {metrics['controller_temperature']:.1f}C\n"
+                f"Controller temp: {_c_to_f(metrics['controller_temperature']):.1f}°F\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Alert reason: {reason}\n"
                 f"IMMEDIATE ACTION REQUIRED! System may be damaged or unsafe."
@@ -591,7 +648,7 @@ def check_critical_conditions(metrics):
                 f"Hardware warning(s) detected:\n\n{faults_text}\n\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Solar power: {metrics['solar_input_power']}W\n"
-                f"Controller temp: {metrics['controller_temperature']:.1f}C\n"
+                f"Controller temp: {_c_to_f(metrics['controller_temperature']):.1f}°F\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Alert reason: {reason}\n"
                 f"Monitor the situation and investigate if warnings persist."
@@ -709,8 +766,8 @@ def check_critical_conditions(metrics):
             subject = "Warning: High Controller Temperature Alert"
             content = (
                 f"Controller temperature is dangerously high: "
-                f"{metrics['controller_temperature']:.1f}C\n"
-                f"Threshold: {HIGH_CONTROLLER_TEMPERATURE_THRESHOLD}C\n"
+                f"{_c_to_f(metrics['controller_temperature']):.1f}°F\n"
+                f"Threshold: {_c_to_f(HIGH_CONTROLLER_TEMPERATURE_THRESHOLD):.1f}°F\n"
                 f"Solar input: {metrics['solar_input_power']}W\n"
                 f"Charging current: {metrics['solar_input_current']:.1f}A\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -729,7 +786,7 @@ def check_critical_conditions(metrics):
             send_email_alert(
                 "Controller Temperature Normal",
                 f"Controller temperature has returned to normal: "
-                f"{metrics['controller_temperature']:.1f}C"
+                f"{_c_to_f(metrics['controller_temperature']):.1f}°F"
             )
 
     # High battery temperature
@@ -742,8 +799,8 @@ def check_critical_conditions(metrics):
             subject = "Warning: High Battery Temperature Alert"
             content = (
                 f"Battery temperature is dangerously high: "
-                f"{metrics['battery_temperature']:.1f}C\n"
-                f"Threshold: {HIGH_BATTERY_TEMPERATURE_THRESHOLD}C\n"
+                f"{_c_to_f(metrics['battery_temperature']):.1f}°F\n"
+                f"Threshold: {_c_to_f(HIGH_BATTERY_TEMPERATURE_THRESHOLD):.1f}°F\n"
                 f"Charging current: {metrics['solar_input_current']:.1f}A\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -762,7 +819,7 @@ def check_critical_conditions(metrics):
             send_email_alert(
                 "Battery Temperature Normal",
                 f"Battery temperature has returned to safe levels: "
-                f"{metrics['battery_temperature']:.1f}C"
+                f"{_c_to_f(metrics['battery_temperature']):.1f}°F"
             )
 
     # Low battery temperature
@@ -775,8 +832,8 @@ def check_critical_conditions(metrics):
             subject = "Warning: Low Battery Temperature Alert"
             content = (
                 f"Battery temperature is critically low: "
-                f"{metrics['battery_temperature']:.1f}C\n"
-                f"Threshold: {LOW_BATTERY_TEMPERATURE_THRESHOLD}C\n"
+                f"{_c_to_f(metrics['battery_temperature']):.1f}°F\n"
+                f"Threshold: {_c_to_f(LOW_BATTERY_TEMPERATURE_THRESHOLD):.1f}°F\n"
                 f"Battery SOC: {metrics['battery_soc']}%\n"
                 f"Battery voltage: {metrics['battery_voltage']:.2f}V\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -795,7 +852,7 @@ def check_critical_conditions(metrics):
             send_email_alert(
                 "Battery Temperature Normal",
                 f"Battery temperature has risen to safe levels: "
-                f"{metrics['battery_temperature']:.1f}C"
+                f"{_c_to_f(metrics['battery_temperature']):.1f}°F"
             )
 
     return active_alerts
