@@ -96,6 +96,7 @@ FLOW_WARNING_DELAY       = get_config('waterflow.flow.warning_delay_seconds',   
 FLOW_IMBALANCE_THRESHOLD = get_config('waterflow.flow.imbalance_threshold_lpm',       0.5)
 FLOW_IMBALANCE_DURATION  = get_config('waterflow.flow.imbalance_duration_seconds',    600)
 FLOW_HISTORY_SIZE        = get_config('waterflow.flow.history_size',                  5)
+AERATOR_FLOW_SUPPRESS    = get_config('waterflow.flow.aerator_flow_suppress_seconds',  30)
 
 # Main Loop Timing
 MAIN_LOOP_INTERVAL = 1  # seconds (non-blocking architecture)
@@ -713,6 +714,19 @@ def monitor_flow():
         duration = FLOW_MEASUREMENT_DURATION
         flow_inlet  = snapshot_inlet  / (FLOW_CALIBRATION_FACTOR * duration)
         flow_outlet = snapshot_outlet / (FLOW_CALIBRATION_FACTOR * duration)
+
+        # Suppress flow readings while aerator is on or during settling period after it turns off.
+        # The aerator causes air bubbles/turbulence that produce false high readings on both sensors.
+        time_since_toggle = time.time() - last_aeration_toggle
+        if aeration_state or (not aeration_state and time_since_toggle < AERATOR_FLOW_SUPPRESS):
+            if aeration_state:
+                logging.debug("[FLOW] Skipping reading — aerator is ON")
+            else:
+                logging.debug(
+                    f"[FLOW] Skipping reading — aerator settling "
+                    f"({time_since_toggle:.0f}s / {AERATOR_FLOW_SUPPRESS}s)"
+                )
+            return  # Don't update baseline or trigger alerts during aerator disturbance
 
         # Validate flow readings before using them
         is_valid, validation_issues = validate_flow_reading(flow_inlet, flow_outlet)
