@@ -74,6 +74,36 @@ SLEEP_TIME = get_config('renogy.poll_interval_seconds', 10)
 # Battery Configuration
 BATTERY_CAPACITY_AH = get_config('renogy.battery_capacity_ah', 50)
 BATTERY_NOMINAL_VOLTAGE = get_config('renogy.battery_nominal_voltage', 12.8)
+BATTERY_CHEMISTRY = get_config('renogy.battery_chemistry', 'lifepo4')
+
+# Voltage-to-SOC lookup tables (open-circuit voltage at ~0.1C load, 12 V 4S pack)
+_SOC_TABLES = {
+    'lifepo4': [
+        (13.60, 100), (13.40, 90), (13.30, 70), (13.20, 50),
+        (13.10, 30), (13.00, 20), (12.80, 10), (12.50,  5), (12.00,  0),
+    ],
+    'lead_acid': [
+        (12.70, 100), (12.50, 90), (12.42, 75), (12.32, 50),
+        (12.20, 25), (12.06, 10), (11.90,  0),
+    ],
+}
+
+def _voltage_to_soc(voltage, chemistry=None):
+    """Linearly interpolate SOC from battery voltage using the chemistry table."""
+    if chemistry is None:
+        chemistry = BATTERY_CHEMISTRY
+    table = _SOC_TABLES.get(chemistry, _SOC_TABLES['lifepo4'])
+    if voltage >= table[0][0]:
+        return table[0][1]
+    if voltage <= table[-1][0]:
+        return table[-1][1]
+    for i in range(len(table) - 1):
+        v_hi, soc_hi = table[i]
+        v_lo, soc_lo = table[i + 1]
+        if v_lo <= voltage <= v_hi:
+            t = (voltage - v_lo) / (v_hi - v_lo)
+            return soc_lo + t * (soc_hi - soc_lo)
+    return None
 
 # File paths (all in ramdisk to minimize SD writes)
 TEMP_FILE_PATH = get_config('paths.renogy_prom_tmp', '/ramdisk/Renogy.prom.tmp')
@@ -252,7 +282,7 @@ watchdog = None
 # DAILY SUMMARY
 # ============================================================================
 
-daily_summary = DailySummary()
+daily_summary = DailySummary(state_file='/var/lib/renogy/renogy_summary_state.json')
 DAILY_SUMMARY_HOUR = get_config('alerts.daily_summary_hour', 7)
 SUMMARY_INTERVAL_DAYS = get_config('alerts.summary_interval_days', 7)
 
@@ -451,6 +481,23 @@ def read_rover_metrics():
             "modbus_total_reads": rover.total_reads,
             "modbus_failed_reads": rover.read_errors,
         }
+
+        # Override hardware SOC with voltage-based estimate when solar is off.
+        # The Renogy controller reports SOC=100% all night on LiFePO4 because
+        # it only updates its internal estimate during active charging cycles.
+        _solar = metrics.get("solar_input_power")
+        _batt_v = metrics.get("battery_voltage")
+        _no_solar = _solar is not None and _solar < 5
+        if _no_solar and _batt_v is not None:
+            _est_soc = _voltage_to_soc(_batt_v)
+            if _est_soc is not None:
+                metrics["battery_soc"] = round(_est_soc, 1)
+                metrics["battery_capacity_ah_remaining"] = round(
+                    (_est_soc / 100.0) * BATTERY_CAPACITY_AH, 2
+                )
+                metrics["battery_soc_source"] = 0   # 0 = voltage estimate
+        else:
+            metrics["battery_soc_source"] = 1       # 1 = hardware register
 
         # Invalidate batch cache after reading so next poll starts fresh
         rover.invalidate_batch_cache()
