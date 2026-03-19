@@ -4,6 +4,7 @@
     "poll_interval_seconds": 10,
     "battery_capacity_ah": 50,
     "battery_nominal_voltage": 12.8,
+    "battery_chemistry": "lifepo4",
     "thresholds": {
       "low_battery_voltage": 12.8,
       "high_controller_temp_c": 40.0,

@@ -620,7 +620,7 @@ def get_daily_volume():
 # DAILY SUMMARY (#11)
 # ============================================================================
 
-daily_summary = DailySummary()
+daily_summary = DailySummary(state_file='/var/lib/renogy/waterflow_summary_state.json')
 
 
 def update_daily_summary(temps, conditions, flow_inlet, flow_outlet):

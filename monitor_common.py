@@ -18,7 +18,7 @@ import time
 import logging
 import smtplib
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from email.message import EmailMessage
 
 # ============================================================================
@@ -415,11 +415,21 @@ class DailySummary:
             summary.mark_sent()
     """
 
-    def __init__(self):
+    def __init__(self, state_file=None):
         self._lock = threading.Lock()
         self._stats = {}  # {key: {'sum': float, 'count': int, 'min': float, 'max': float}}
         self._sent_today = False
         self._last_sent_date = None
+        self._state_file = state_file
+        if state_file and os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as f:
+                    data = json.load(f)
+                ls = data.get('last_sent_date')
+                if ls:
+                    self._last_sent_date = date.fromisoformat(ls)
+            except Exception as e:
+                logging.warning(f"DailySummary: could not load state from {state_file}: {e}")
 
     def update(self, key, value):
         """Record a new value for a named stat."""
@@ -490,6 +500,13 @@ class DailySummary:
             self._last_sent_date = today
             self._sent_today = True
             self._stats = {}
+        if self._state_file:
+            try:
+                os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+                with open(self._state_file, 'w') as f:
+                    json.dump({'last_sent_date': today.isoformat()}, f)
+            except Exception as e:
+                logging.warning(f"DailySummary: could not save state to {self._state_file}: {e}")
 
     def keys(self):
         """Return list of tracked stat keys."""
