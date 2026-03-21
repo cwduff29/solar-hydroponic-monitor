@@ -577,10 +577,14 @@ def validate_flow_reading(flow_inlet, flow_outlet):
         issues.append(f"Inlet flow out of range: {flow_inlet:.3f} L/min (max {MAX_FLOW_LPM})")
     if flow_outlet > MAX_FLOW_LPM:
         issues.append(f"Outlet flow out of range: {flow_outlet:.3f} L/min (max {MAX_FLOW_LPM})")
-    # Spike detection — skip on startup when smoothed == 0 (no baseline yet)
-    if smoothed_flow_inlet > 0 and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
+    # Spike detection — skip when smoothed is 0 (startup) or too small to be a reliable baseline.
+    # If smoothed drops near zero (e.g. after aerator suppression or a restart), all real readings
+    # would be rejected as spikes, permanently locking out updates. Only apply when baseline is
+    # large enough that a valid reading at MIN_FLOW_THRESHOLD wouldn't be falsely flagged.
+    spike_min_baseline = MIN_FLOW_THRESHOLD / MAX_SPIKE_MULTIPLIER
+    if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
         issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
-    if smoothed_flow_outlet > 0 and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
+    if smoothed_flow_outlet > spike_min_baseline and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
         issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
     return (len(issues) == 0, issues)
 
