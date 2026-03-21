@@ -1,7 +1,7 @@
 [Unit]
 Description=Renogy Solar Charge Controller Monitor
-After=local-fs.target network.target
-Wants=network.target
+After=local-fs.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
