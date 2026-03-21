@@ -1,7 +1,7 @@
 [Unit]
 Description=Hydroponic Water Flow and Equipment Monitor
-After=local-fs.target network.target renogy.service
-Wants=network.target
+After=local-fs.target network-online.target systemd-udev-settle.service renogy.service
+Wants=network-online.target
 
 [Service]
 Type=simple

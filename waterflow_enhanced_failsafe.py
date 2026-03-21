@@ -770,6 +770,11 @@ def monitor_flow():
             consecutive_failures = 0
             sensors_available['flow_inlet'] = True
             sensors_available['flow_outlet'] = True
+            if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD and alert_manager.clear('pump_recovery_failed'):
+                logging.warning(
+                    "pump_recovery_failed cleared: flow alerts disabled but flow is healthy "
+                    f"({smoothed_flow_inlet:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min)"
+                )
             return
 
         # Flow trend analysis (#12)
@@ -846,10 +851,16 @@ def monitor_flow():
                         f"Water flow has returned to normal.\n"
                         f"Current flow: {smoothed_flow_inlet:.3f} L/min"
                     )
-                alert_manager.clear('pump_recovery_failed')
                 low_flow_start_time  = None
                 low_flow_alert_sent  = False
                 recovery_attempted   = False
+            # Clear pump_recovery_failed whenever flow is healthy — handles
+            # post-restart stale state where low_flow_start_time was never set
+            if alert_manager.clear('pump_recovery_failed'):
+                logging.warning(
+                    "pump_recovery_failed cleared: flow restored to healthy "
+                    f"({smoothed_flow_inlet:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min)"
+                )
 
         # Flow imbalance (leak detection)
         flow_diff = abs(smoothed_flow_inlet - smoothed_flow_outlet)
@@ -1609,6 +1620,11 @@ def test_backup_pump():
         if test_flow >= MIN_FLOW_THRESHOLD:
             result = "PASSED"
             status = "OK"
+            if alert_manager.clear('pump_recovery_failed'):
+                logging.warning(
+                    "pump_recovery_failed cleared by routine backup pump test: "
+                    f"backup pump flow {test_flow:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min"
+                )
         else:
             result = "FAILED"
             status = "FAIL"
