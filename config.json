@@ -7,7 +7,7 @@
     "battery_chemistry": "lifepo4",
     "thresholds": {
       "low_battery_voltage": 12.8,
-      "high_controller_temp_c": 40.0,
+      "high_controller_temp_c": 45.0,
       "high_battery_temp_c": 50.0,
       "low_battery_temp_c": 0.0,
       "low_battery_soc_pct": 20.0,
@@ -117,9 +117,9 @@
       "cycle_max_attempts": 2
     },
     "thresholds": {
-      "max_temp_c":           80.0,
-      "min_temp_c":          -40.0,
-      "max_humidity_pct":    100.0,
+      "max_temp_c":           60.0,
+      "min_temp_c":          -20.0,
+      "max_humidity_pct":     95.0,
       "min_humidity_pct":      0.0,
       "max_pressure_hpa":   1084.0,
       "min_pressure_hpa":    870.0,
