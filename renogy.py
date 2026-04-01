@@ -224,6 +224,7 @@ signal.signal(signal.SIGHUP, _sighup_handler)
 rover = None
 last_successful_connection = None
 connection_failures = 0
+_using_voltage_soc = False   # hysteresis state for SOC source selection
 
 def initialize_rover():
     """Initialize Renogy Rover with retry logic"""
@@ -485,10 +486,20 @@ def read_rover_metrics():
         # Override hardware SOC with voltage-based estimate when solar is off.
         # The Renogy controller reports SOC=100% all night on LiFePO4 because
         # it only updates its internal estimate during active charging cycles.
+        #
+        # Hysteresis prevents rapid oscillation when solar power fluctuates near
+        # the threshold (e.g. late afternoon cloud cover): switch TO voltage mode
+        # when solar drops below 5W, but only switch BACK to hardware mode when
+        # solar clearly recovers above 25W.
+        global _using_voltage_soc
         _solar = metrics.get("solar_input_power")
         _batt_v = metrics.get("battery_voltage")
-        _no_solar = _solar is not None and _solar < 5
-        if _no_solar and _batt_v is not None:
+        if _solar is not None:
+            if _solar < 5:
+                _using_voltage_soc = True
+            elif _solar > 25:
+                _using_voltage_soc = False
+        if _using_voltage_soc and _batt_v is not None:
             _est_soc = _voltage_to_soc(_batt_v)
             if _est_soc is not None:
                 metrics["battery_soc"] = round(_est_soc, 1)
