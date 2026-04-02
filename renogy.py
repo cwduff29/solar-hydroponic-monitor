@@ -225,6 +225,8 @@ rover = None
 last_successful_connection = None
 connection_failures = 0
 _using_voltage_soc = False   # hysteresis state for SOC source selection
+_smoothed_batt_voltage = None  # EMA-smoothed voltage used for SOC estimation
+_VOLTAGE_EMA_ALPHA = 0.10      # ~3 min time constant at 10 s poll interval
 
 def initialize_rover():
     """Initialize Renogy Rover with retry logic"""
@@ -491,7 +493,7 @@ def read_rover_metrics():
         # the threshold (e.g. late afternoon cloud cover): switch TO voltage mode
         # when solar drops below 5W, but only switch BACK to hardware mode when
         # solar clearly recovers above 25W.
-        global _using_voltage_soc
+        global _using_voltage_soc, _smoothed_batt_voltage
         _solar = metrics.get("solar_input_power")
         _batt_v = metrics.get("battery_voltage")
         if _solar is not None:
@@ -500,7 +502,18 @@ def read_rover_metrics():
             elif _solar > 25:
                 _using_voltage_soc = False
         if _using_voltage_soc and _batt_v is not None:
-            _est_soc = _voltage_to_soc(_batt_v)
+            # Smooth voltage with EMA before the SOC lookup to suppress transients
+            # from pump load cycles. LiFePO4 is ~20 % SOC per 0.1 V in the flat
+            # region (13.1–13.3 V), so raw instantaneous voltage produces large
+            # SOC swings each time the pump turns on or off.
+            if _smoothed_batt_voltage is None:
+                _smoothed_batt_voltage = _batt_v
+            else:
+                _smoothed_batt_voltage = (
+                    _VOLTAGE_EMA_ALPHA * _batt_v
+                    + (1.0 - _VOLTAGE_EMA_ALPHA) * _smoothed_batt_voltage
+                )
+            _est_soc = _voltage_to_soc(_smoothed_batt_voltage)
             if _est_soc is not None:
                 metrics["battery_soc"] = round(_est_soc, 1)
                 metrics["battery_capacity_ah_remaining"] = round(
@@ -508,6 +521,7 @@ def read_rover_metrics():
                 )
                 metrics["battery_soc_source"] = 0   # 0 = voltage estimate
         else:
+            _smoothed_batt_voltage = None   # reset so EMA initialises fresh on re-entry
             metrics["battery_soc_source"] = 1       # 1 = hardware register
 
         # Invalidate batch cache after reading so next poll starts fresh
