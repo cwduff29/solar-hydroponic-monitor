@@ -225,8 +225,8 @@ rover = None
 last_successful_connection = None
 connection_failures = 0
 _using_voltage_soc = False   # hysteresis state for SOC source selection
-_smoothed_batt_voltage = None  # EMA-smoothed voltage used for SOC estimation
-_VOLTAGE_EMA_ALPHA = 0.10      # ~3 min time constant at 10 s poll interval
+_cc_soc = None               # coulomb-counted SOC (%), None when not active
+_cc_last_time = None         # monotonic timestamp of last integration step
 
 def initialize_rover():
     """Initialize Renogy Rover with retry logic"""
@@ -485,44 +485,62 @@ def read_rover_metrics():
             "modbus_failed_reads": rover.read_errors,
         }
 
-        # Override hardware SOC with voltage-based estimate when solar is off.
-        # The Renogy controller reports SOC=100% all night on LiFePO4 because
-        # it only updates its internal estimate during active charging cycles.
+        # Override hardware SOC with coulomb counting when solar is off.
+        # The Renogy controller freezes its SOC register at the last charged value
+        # on LiFePO4 — it only updates during active charging cycles. We seed the
+        # counter from battery voltage at the moment solar stops (no load transients,
+        # most reliable reading), then integrate load current each poll interval.
         #
-        # Hysteresis prevents rapid oscillation when solar power fluctuates near
-        # the threshold (e.g. late afternoon cloud cover): switch TO voltage mode
-        # when solar drops below 5W, but only switch BACK to hardware mode when
-        # solar clearly recovers above 25W.
-        global _using_voltage_soc, _smoothed_batt_voltage
+        # Hysteresis: switch TO coulomb mode when solar < 5W, back to hardware
+        # when solar clearly recovers above 25W.
+        global _using_voltage_soc, _cc_soc, _cc_last_time
         _solar = metrics.get("solar_input_power")
         _batt_v = metrics.get("battery_voltage")
+        _load_i = metrics.get("load_current")
+
         if _solar is not None:
             if _solar < 5:
                 _using_voltage_soc = True
             elif _solar > 25:
                 _using_voltage_soc = False
+
         if _using_voltage_soc and _batt_v is not None:
-            # Smooth voltage with EMA before the SOC lookup to suppress transients
-            # from pump load cycles. LiFePO4 is ~20 % SOC per 0.1 V in the flat
-            # region (13.1–13.3 V), so raw instantaneous voltage produces large
-            # SOC swings each time the pump turns on or off.
-            if _smoothed_batt_voltage is None:
-                _smoothed_batt_voltage = _batt_v
+            now = time.monotonic()
+            if _cc_soc is None:
+                # Seed from battery voltage at the transition point. Voltage is
+                # most reliable here: charger just stopped, no active load spike.
+                seed = _voltage_to_soc(_batt_v)
+                _cc_soc = seed if seed is not None else 50.0
+                _cc_last_time = now
+                logging.info(
+                    f"Coulomb counter seeded at {_cc_soc:.1f}% "
+                    f"from battery voltage {_batt_v:.2f}V"
+                )
             else:
-                _smoothed_batt_voltage = (
-                    _VOLTAGE_EMA_ALPHA * _batt_v
-                    + (1.0 - _VOLTAGE_EMA_ALPHA) * _smoothed_batt_voltage
-                )
-            _est_soc = _voltage_to_soc(_smoothed_batt_voltage)
-            if _est_soc is not None:
-                metrics["battery_soc"] = round(_est_soc, 1)
-                metrics["battery_capacity_ah_remaining"] = round(
-                    (_est_soc / 100.0) * BATTERY_CAPACITY_AH, 2
-                )
-                metrics["battery_soc_source"] = 0   # 0 = voltage estimate
+                # Integrate discharge since last poll.
+                # Prefer load_current; fall back to load_power / battery_voltage.
+                if _cc_last_time is not None:
+                    dt_hours = (now - _cc_last_time) / 3600.0
+                    if _load_i is not None:
+                        discharge_a = _load_i
+                    elif metrics.get("load_power") is not None:
+                        discharge_a = metrics["load_power"] / _batt_v
+                    else:
+                        discharge_a = None
+                    if discharge_a is not None:
+                        _cc_soc -= (discharge_a * dt_hours / BATTERY_CAPACITY_AH) * 100.0
+                        _cc_soc = max(0.0, min(100.0, _cc_soc))
+                _cc_last_time = now
+
+            metrics["battery_soc"] = round(_cc_soc, 1)
+            metrics["battery_capacity_ah_remaining"] = round(
+                (_cc_soc / 100.0) * BATTERY_CAPACITY_AH, 2
+            )
+            metrics["battery_soc_source"] = 0   # 0 = coulomb counter
         else:
-            _smoothed_batt_voltage = None   # reset so EMA initialises fresh on re-entry
-            metrics["battery_soc_source"] = 1       # 1 = hardware register
+            _cc_soc = None
+            _cc_last_time = None
+            metrics["battery_soc_source"] = 1   # 1 = hardware register
 
         # Invalidate batch cache after reading so next poll starts fresh
         rover.invalidate_batch_cache()
