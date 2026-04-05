@@ -94,6 +94,7 @@ FLOW_MEASUREMENT_DURATION = get_config('waterflow.flow.measurement_duration_seco
 MIN_FLOW_THRESHOLD       = get_config('waterflow.flow.min_flow_threshold_lpm',        0.25)
 FLOW_WARNING_DELAY       = get_config('waterflow.flow.warning_delay_seconds',         600)
 FLOW_IMBALANCE_THRESHOLD = get_config('waterflow.flow.imbalance_threshold_lpm',       0.5)
+FLOW_IMBALANCE_PCT       = get_config('waterflow.flow.imbalance_threshold_pct',        30)
 FLOW_IMBALANCE_DURATION  = get_config('waterflow.flow.imbalance_duration_seconds',    600)
 FLOW_HISTORY_SIZE        = get_config('waterflow.flow.history_size',                  5)
 AERATOR_FLOW_SUPPRESS    = get_config('waterflow.flow.aerator_flow_suppress_seconds',  30)
@@ -144,6 +145,7 @@ def _load_thresholds():
     global MAX_HUMIDITY_PCT, MIN_HUMIDITY_PCT
     global MAX_PRESSURE_HPA, MIN_PRESSURE_HPA
     global MAX_FLOW_LPM, MAX_SPIKE_MULTIPLIER
+    global FLOW_IMBALANCE_PCT
 
     # Temperature thresholds (all in degC internally)
     NFT_RETURN_EXTREME_TEMP_C             = get_config('waterflow.temperature.nft_extreme_temp_c',                29.4)
@@ -217,6 +219,8 @@ def _load_thresholds():
     MIN_PRESSURE_HPA     = get_config('waterflow.thresholds.min_pressure_hpa',    870.0)
     MAX_FLOW_LPM         = get_config('waterflow.thresholds.max_flow_lpm',         10.0)
     MAX_SPIKE_MULTIPLIER = get_config('waterflow.thresholds.max_spike_multiplier',  5.0)
+
+    FLOW_IMBALANCE_PCT   = get_config('waterflow.flow.imbalance_threshold_pct',     30)
 
 _load_thresholds()
 
@@ -863,9 +867,20 @@ def monitor_flow():
                 )
 
         # Flow imbalance (leak detection)
-        flow_diff = abs(smoothed_flow_inlet - smoothed_flow_outlet)
+        # Requires BOTH absolute difference AND percentage drop to exceed thresholds.
+        # The absolute floor prevents false positives from sensor noise at very low flow;
+        # the percentage check prevents false positives from normal evaporation/plant uptake
+        # which causes a consistent ~20-25% inlet-outlet gap at normal operating flow.
+        flow_diff = smoothed_flow_inlet - smoothed_flow_outlet  # signed: positive = inlet > outlet
+        flow_diff_abs = abs(flow_diff)
+        flow_imbalance_pct = (flow_diff / smoothed_flow_inlet * 100) if smoothed_flow_inlet > 0 else 0
 
-        if flow_diff > FLOW_IMBALANCE_THRESHOLD:
+        imbalance_triggered = (
+            flow_diff_abs > FLOW_IMBALANCE_THRESHOLD
+            and flow_imbalance_pct > FLOW_IMBALANCE_PCT
+        )
+
+        if imbalance_triggered:
             if flow_imbalance_start_time is None:
                 flow_imbalance_start_time = time.time()
             elif (time.time() - flow_imbalance_start_time > FLOW_IMBALANCE_DURATION
@@ -878,8 +893,8 @@ def monitor_flow():
                         f"Flow imbalance detected for {FLOW_IMBALANCE_DURATION/60:.0f} minutes.\n"
                         f"Inlet flow: {smoothed_flow_inlet:.3f} L/min\n"
                         f"Outlet flow: {smoothed_flow_outlet:.3f} L/min\n"
-                        f"Difference: {flow_diff:.3f} L/min\n"
-                        f"Threshold: {FLOW_IMBALANCE_THRESHOLD} L/min\n"
+                        f"Difference: {flow_diff_abs:.3f} L/min ({flow_imbalance_pct:.1f}%)\n"
+                        f"Thresholds: >{FLOW_IMBALANCE_THRESHOLD} L/min AND >{FLOW_IMBALANCE_PCT}%\n"
                         f"Alert reason: {reason}\n"
                         f"Check system for leaks!"
                     )
@@ -1231,20 +1246,25 @@ def control_aeration():
         mode = f"{mode}-{temps[water_key]:.1f}C"
 
     # Alert if load shedding active
-    if mode.startswith("disabled") or mode.startswith("reduced"):
-        alert_type = 'load_shed_active'
+    if mode.startswith("disabled"):
+        alert_type = 'aeration_disabled'
         should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             send_email_alert(
-                "Warning: Aeration Load Shedding Active",
-                f"Aeration reduced due to low battery.\n"
+                "Critical: Aeration Disabled Due to Low Battery",
+                f"Aeration has been turned off due to critically low battery.\n"
                 f"Battery SOC: {soc}%\n"
                 f"Mode: {mode}\n"
                 f"Alert reason: {reason}"
             )
             alert_manager.mark_sent(alert_type)
     else:
-        alert_manager.clear('load_shed_active')
+        alert_manager.clear('aeration_disabled')
+        if mode.startswith("reduced"):
+            logging.warning(
+                f"Aeration load shedding active: reduced schedule "
+                f"(SOC={soc}%, mode={mode})"
+            )
 
     current_time = time.time()
     time_in_state = current_time - last_aeration_toggle
