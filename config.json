@@ -47,6 +47,7 @@
       "min_flow_threshold_lpm": 0.25,
       "warning_delay_seconds": 600,
       "imbalance_threshold_lpm": 0.5,
+      "imbalance_threshold_pct": 30,
       "imbalance_duration_seconds": 600,
       "history_size": 5,
       "trend_drop_pct": 0.20,
