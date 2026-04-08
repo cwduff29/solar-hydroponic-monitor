@@ -53,7 +53,7 @@
     "flow": {
       "calibration_factor": 7.5,
       "measurement_duration_seconds": 10,
-      "min_flow_threshold_lpm": 0.25,
+      "min_flow_threshold_lpm": 0.20,
       "warning_delay_seconds": 600,
       "imbalance_threshold_lpm": 0.5,
       "imbalance_threshold_pct": 30,
