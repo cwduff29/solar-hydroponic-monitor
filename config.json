@@ -39,7 +39,7 @@
       "pwm_gpio": 12,
       "dir_gpio": 16,
       "frequency_hz": 1000,
-      "dir_forward": 1,
+      "dir_forward": 0,
       "default_duty_cycle_pct": 50,
       "min_duty_cycle_pct": 0
     },
