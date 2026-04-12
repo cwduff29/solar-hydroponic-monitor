@@ -40,7 +40,7 @@
       "dir_gpio": 16,
       "frequency_hz": 1000,
       "dir_forward": 0,
-      "default_duty_cycle_pct": 50,
+      "default_duty_cycle_pct": 75,
       "min_duty_cycle_pct": 0
     },
     "relay": {
