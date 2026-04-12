@@ -257,6 +257,15 @@ class AlertManager:
             if not state['active']:
                 state['active'] = True
                 state['first_detected'] = now
+                # Even on first/re-occurrence after a clear, respect cooldown.
+                # Without this check, an alert that fires, clears, and re-fires
+                # within the cooldown window bypasses rate-limiting entirely.
+                if state['last_sent']:
+                    time_since_last = now - state['last_sent']
+                    cooldown = timedelta(minutes=self._cooldown_minutes)
+                    if time_since_last < cooldown:
+                        remaining = cooldown.total_seconds() - time_since_last.total_seconds()
+                        return (False, f"cooldown after re-occurrence ({remaining:.0f}s remaining)")
                 return (True, "first_occurrence")
 
             if not state['last_sent']:
