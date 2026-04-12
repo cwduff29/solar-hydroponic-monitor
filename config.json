@@ -48,7 +48,7 @@
       "warning_delay_seconds": 600,
       "imbalance_threshold_lpm": 0.5,
       "imbalance_threshold_pct": 30,
-      "imbalance_duration_seconds": 600,
+      "imbalance_duration_seconds": 1800,
       "history_size": 5,
       "trend_drop_pct": 0.20,
       "aerator_flow_suppress_seconds": 30
