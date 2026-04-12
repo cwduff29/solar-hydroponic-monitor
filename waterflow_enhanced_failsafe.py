@@ -25,6 +25,7 @@ Features:
 - Cached DS18B20 sensor paths
 - Cached BME280 calibration parameters
 - Skip pump tests on low battery SOC
+- Brushless PWM main pump control via MOSFET switch module
 """
 
 import RPi.GPIO as GPIO
@@ -87,6 +88,14 @@ MAIN_PUMP_RELAY_GPIO    = get_config('waterflow.gpio.main_pump_relay',    22)
 BACKUP_PUMP_RELAY_GPIO  = get_config('waterflow.gpio.backup_pump_relay',  23)
 AERATION_PUMP_GPIO      = get_config('waterflow.gpio.aeration_pump',      24)
 FAN_CONTROL_GPIO        = get_config('waterflow.gpio.fan_control',        25)
+
+# Brushless PWM Configuration for main pump (MOSFET switch module)
+# Single PWM GPIO drives the MOSFET gate; the motor handles its own commutation.
+MAIN_PUMP_PWM_ENABLED  = get_config('waterflow.main_pump_brushless_pwm.enabled',              False)
+MAIN_PUMP_PWM_GPIO     = get_config('waterflow.main_pump_brushless_pwm.pwm_gpio',             12)
+MAIN_PUMP_PWM_FREQ     = get_config('waterflow.main_pump_brushless_pwm.frequency_hz',         1000)
+MAIN_PUMP_DEFAULT_DUTY = get_config('waterflow.main_pump_brushless_pwm.default_duty_cycle_pct', 100)
+MAIN_PUMP_MIN_DUTY     = get_config('waterflow.main_pump_brushless_pwm.min_duty_cycle_pct',   0)
 
 # Flow Sensor Configuration
 FLOW_CALIBRATION_FACTOR  = get_config('waterflow.flow.calibration_factor',           7.5)
@@ -281,10 +290,31 @@ def get_relay_state(device_on, terminal_type):
         return GPIO.HIGH if relay_energized else GPIO.LOW
 
 
-def set_main_pump(state):
-    """Set main pump ON or OFF"""
-    gpio_state = get_relay_state(state, MAIN_PUMP_TERMINAL)
-    GPIO.output(MAIN_PUMP_RELAY_GPIO, gpio_state)
+def set_main_pump(state, duty_cycle=None):
+    """Set main pump ON or OFF, with optional PWM duty cycle (0-100) in brushless PWM mode."""
+    global main_pump_duty_cycle
+    if MAIN_PUMP_PWM_ENABLED and _main_pump_pwm is not None:
+        if state:
+            dc = duty_cycle if duty_cycle is not None else MAIN_PUMP_DEFAULT_DUTY
+            dc = max(float(MAIN_PUMP_MIN_DUTY), min(100.0, float(dc)))
+            main_pump_duty_cycle = dc
+            _main_pump_pwm.ChangeDutyCycle(dc)
+        else:
+            main_pump_duty_cycle = 0.0
+            _main_pump_pwm.ChangeDutyCycle(0)
+    else:
+        main_pump_duty_cycle = 100.0 if state else 0.0
+        gpio_state = get_relay_state(state, MAIN_PUMP_TERMINAL)
+        GPIO.output(MAIN_PUMP_RELAY_GPIO, gpio_state)
+
+
+def set_main_pump_speed(duty_cycle_pct):
+    """Adjust main pump speed while running (PWM mode only). No-op in relay mode."""
+    if MAIN_PUMP_PWM_ENABLED and _main_pump_pwm is not None:
+        if main_pump_duty_cycle > 0:
+            set_main_pump(True, duty_cycle=duty_cycle_pct)
+    else:
+        logging.warning("set_main_pump_speed called but brushless PWM mode is not enabled")
 
 
 def set_backup_pump(state):
@@ -308,6 +338,10 @@ def set_fan(state):
 # ============================================================================
 # GLOBAL STATE
 # ============================================================================
+
+# Brushless PWM object for main pump speed control
+_main_pump_pwm = None
+main_pump_duty_cycle = 0.0  # current duty cycle (0-100); 0 = off
 
 # Flow counter lock (#1 - race condition fix)
 _flow_lock = threading.Lock()
@@ -444,13 +478,24 @@ def clear_alert(alert_type):
 
 def setup_gpio():
     """Initialize GPIO pins"""
+    global _main_pump_pwm
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
     GPIO.setup(FLOW_SENSOR_INLET_GPIO,  GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(FLOW_SENSOR_OUTLET_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    GPIO.setup(MAIN_PUMP_RELAY_GPIO,   GPIO.OUT)
+    if MAIN_PUMP_PWM_ENABLED:
+        GPIO.setup(MAIN_PUMP_PWM_GPIO, GPIO.OUT)
+        _main_pump_pwm = GPIO.PWM(MAIN_PUMP_PWM_GPIO, MAIN_PUMP_PWM_FREQ)
+        _main_pump_pwm.start(0)
+        logging.info(
+            f"Brushless PWM initialized: GPIO{MAIN_PUMP_PWM_GPIO}, "
+            f"Freq={MAIN_PUMP_PWM_FREQ}Hz"
+        )
+    else:
+        GPIO.setup(MAIN_PUMP_RELAY_GPIO, GPIO.OUT)
+
     GPIO.setup(BACKUP_PUMP_RELAY_GPIO, GPIO.OUT)
     GPIO.setup(AERATION_PUMP_GPIO,     GPIO.OUT)
     GPIO.setup(FAN_CONTROL_GPIO,       GPIO.OUT)
@@ -460,12 +505,18 @@ def setup_gpio():
     set_aeration(False)
     set_fan(False)
 
-    logging.info(
-        f"GPIO initialized - Relay config: "
-        f"Main={MAIN_PUMP_TERMINAL}, Backup={BACKUP_PUMP_TERMINAL}, "
-        f"Aeration={AERATION_TERMINAL}, Fan={FAN_TERMINAL}, "
-        f"Board={'ACTIVE_LOW' if RELAY_BOARD_ACTIVE_LOW else 'ACTIVE_HIGH'}"
-    )
+    if MAIN_PUMP_PWM_ENABLED:
+        logging.info(
+            f"GPIO initialized - Main pump: brushless PWM (GPIO{MAIN_PUMP_PWM_GPIO}), "
+            f"Backup/Aeration/Fan: relay"
+        )
+    else:
+        logging.info(
+            f"GPIO initialized - Relay config: "
+            f"Main={MAIN_PUMP_TERMINAL}, Backup={BACKUP_PUMP_TERMINAL}, "
+            f"Aeration={AERATION_TERMINAL}, Fan={FAN_TERMINAL}, "
+            f"Board={'ACTIVE_LOW' if RELAY_BOARD_ACTIVE_LOW else 'ACTIVE_HIGH'}"
+        )
 
     for pin in (FLOW_SENSOR_INLET_GPIO, FLOW_SENSOR_OUTLET_GPIO):
         try:
@@ -1873,6 +1924,11 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# HELP waterflow_backup_pump_active Backup pump running as failover\n")
             f.write("# TYPE waterflow_backup_pump_active gauge\n")
             f.write(f"waterflow_backup_pump_active{{source=\"waterflow\"}} {1 if backup_pump_active else 0}\n")
+
+            if MAIN_PUMP_PWM_ENABLED:
+                f.write("# HELP waterflow_main_pump_duty_cycle Main pump PWM duty cycle (0-100)\n")
+                f.write("# TYPE waterflow_main_pump_duty_cycle gauge\n")
+                f.write(f"waterflow_main_pump_duty_cycle{{source=\"waterflow\"}} {main_pump_duty_cycle:.1f}\n")
 
             f.write("# HELP waterflow_pump_recovery_attempted Recovery attempted for current low flow event\n")
             f.write("# TYPE waterflow_pump_recovery_attempted gauge\n")
