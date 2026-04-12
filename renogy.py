@@ -488,8 +488,10 @@ def read_rover_metrics():
         # Override hardware SOC with coulomb counting when solar is off.
         # The Renogy controller freezes its SOC register at the last charged value
         # on LiFePO4 — it only updates during active charging cycles. We seed the
-        # counter from battery voltage at the moment solar stops (no load transients,
-        # most reliable reading), then integrate load current each poll interval.
+        # counter from the hardware SOC register at the moment solar stops, since
+        # it was being actively updated during the charge cycle and reflects the
+        # true SOC far better than voltage under load (LiFePO4 has an extremely
+        # flat discharge curve and load current depresses voltage significantly).
         #
         # Hysteresis: switch TO coulomb mode when solar < 5W, back to hardware
         # when solar clearly recovers above 25W.
@@ -507,15 +509,23 @@ def read_rover_metrics():
         if _using_voltage_soc and _batt_v is not None:
             now = time.monotonic()
             if _cc_soc is None:
-                # Seed from battery voltage at the transition point. Voltage is
-                # most reliable here: charger just stopped, no active load spike.
-                seed = _voltage_to_soc(_batt_v)
-                _cc_soc = seed if seed is not None else 50.0
+                # Seed from the hardware SOC register at the transition point.
+                # The controller was actively updating it during the charge cycle,
+                # so it reflects actual SOC. Fall back to voltage only if unavailable.
+                if battery_soc is not None:
+                    _cc_soc = float(battery_soc)
+                    logging.info(
+                        f"Coulomb counter seeded at {_cc_soc:.1f}% "
+                        f"from hardware SOC register (battery voltage {_batt_v:.2f}V)"
+                    )
+                else:
+                    seed = _voltage_to_soc(_batt_v)
+                    _cc_soc = seed if seed is not None else 50.0
+                    logging.info(
+                        f"Coulomb counter seeded at {_cc_soc:.1f}% "
+                        f"from battery voltage {_batt_v:.2f}V (hardware SOC unavailable)"
+                    )
                 _cc_last_time = now
-                logging.info(
-                    f"Coulomb counter seeded at {_cc_soc:.1f}% "
-                    f"from battery voltage {_batt_v:.2f}V"
-                )
             else:
                 # Integrate discharge since last poll.
                 # Prefer load_current; fall back to load_power / battery_voltage.
