@@ -136,6 +136,13 @@
     },
     "health": {
       "max_consecutive_failures": 5
+    },
+    "main_pump_brushless_pwm": {
+      "enabled": false,
+      "pwm_gpio": 12,
+      "frequency_hz": 1000,
+      "default_duty_cycle_pct": 100,
+      "min_duty_cycle_pct": 0
     }
   },
   "alerts": {
