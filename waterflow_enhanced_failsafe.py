@@ -636,11 +636,15 @@ def validate_flow_reading(flow_inlet, flow_outlet):
     # If smoothed drops near zero (e.g. after aerator suppression or a restart), all real readings
     # would be rejected as spikes, permanently locking out updates. Only apply when baseline is
     # large enough that a valid reading at MIN_FLOW_THRESHOLD wouldn't be falsely flagged.
+    # Also skip while backup_pump_active: the backup pump may have significantly different flow
+    # characteristics than the main pump, so the main pump's smoothed baseline is not a valid
+    # reference and would cause genuine backup pump readings to be rejected as spikes.
     spike_min_baseline = MIN_FLOW_THRESHOLD / MAX_SPIKE_MULTIPLIER
-    if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
-        issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
-    if smoothed_flow_outlet > spike_min_baseline and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
-        issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
+    if not backup_pump_active:
+        if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
+            issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
+        if smoothed_flow_outlet > spike_min_baseline and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
+            issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
     return (len(issues) == 0, issues)
 
 
@@ -1953,6 +1957,10 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# HELP waterflow_pump_recovery_failed Both pumps failed to restore flow, manual intervention required\n")
             f.write("# TYPE waterflow_pump_recovery_failed gauge\n")
             f.write(f"waterflow_pump_recovery_failed{{source=\"waterflow\"}} {1 if alert_manager.is_active('pump_recovery_failed') else 0}\n")
+
+            f.write("# HELP waterflow_backup_pump_failover Main pump failed, system running on backup pump\n")
+            f.write("# TYPE waterflow_backup_pump_failover gauge\n")
+            f.write(f"waterflow_backup_pump_failover{{source=\"waterflow\"}} {1 if alert_manager.is_active('backup_pump_failover') else 0}\n")
 
             f.write("# HELP waterflow_leak_detected Leak detection active\n")
             f.write("# TYPE waterflow_leak_detected gauge\n")

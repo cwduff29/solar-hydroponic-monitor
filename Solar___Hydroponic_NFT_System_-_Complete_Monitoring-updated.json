@@ -1824,7 +1824,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "active_faults_count{source=\"renogy\"} + waterflow_pump_recovery_failed{source=\"waterflow\"}",
+          "expr": "active_faults_count{source=\"renogy\"} + waterflow_pump_recovery_failed{source=\"waterflow\"} + waterflow_backup_pump_failover{source=\"waterflow\"}",
           "refId": "A"
         }
       ],
