@@ -1715,6 +1715,20 @@ def test_backup_pump():
 # PUMP RECOVERY
 # ============================================================================
 
+def _take_fresh_flow_reading():
+    """
+    Take a fresh flow measurement while the main loop is blocked (e.g. during
+    pump recovery sleeps).  smoothed_flow_inlet is only updated by monitor_flow()
+    which cannot run while attempt_pump_recovery() holds the thread, so we do
+    a one-shot measurement here instead of reading the stale smoothed value.
+    """
+    start_flow_measurement()
+    time.sleep(FLOW_MEASUREMENT_DURATION + 1)
+    with _flow_lock:
+        snapshot = count_inlet
+    return snapshot / (FLOW_CALIBRATION_FACTOR * FLOW_MEASUREMENT_DURATION)
+
+
 def attempt_pump_recovery():
     """
     Attempt to restore flow after sustained low flow is detected.
@@ -1738,17 +1752,18 @@ def attempt_pump_recovery():
         set_main_pump(True)
 
         time.sleep(PUMP_RECOVERY_WAIT)
+        fresh_flow = _take_fresh_flow_reading()
 
-        if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD:
+        if fresh_flow >= MIN_FLOW_THRESHOLD:
             logging.warning(
                 f"Pump recovery: flow restored after cycle {attempt} "
-                f"({smoothed_flow_inlet:.3f} L/min)"
+                f"({fresh_flow:.3f} L/min)"
             )
             send_email_alert(
                 "Water Flow Restored - Main Pump Cycled",
                 f"Low flow was resolved by cycling the main pump.\n\n"
                 f"Cycles attempted: {attempt}\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
@@ -1764,10 +1779,11 @@ def attempt_pump_recovery():
     recovery_attempted = False  # Allow one recovery attempt on the backup pump
 
     time.sleep(PUMP_RECOVERY_WAIT)
+    fresh_flow = _take_fresh_flow_reading()
 
-    if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD:
+    if fresh_flow >= MIN_FLOW_THRESHOLD:
         logging.warning(
-            f"Pump recovery: backup pump restored flow ({smoothed_flow_inlet:.3f} L/min)"
+            f"Pump recovery: backup pump restored flow ({fresh_flow:.3f} L/min)"
         )
         alert_type = 'backup_pump_failover'
         should_send, reason = alert_manager.should_send(alert_type)
@@ -1776,7 +1792,7 @@ def attempt_pump_recovery():
                 "Warning: Running on Backup Pump - Main Pump Failed",
                 f"Main pump failed to restore flow after {PUMP_CYCLE_MAX_ATTEMPTS} cycles.\n"
                 f"System has switched to the backup pump.\n\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Action required: inspect main pump and filters.\n"
@@ -1785,7 +1801,7 @@ def attempt_pump_recovery():
             alert_manager.mark_sent(alert_type)
     else:
         logging.error(
-            f"Pump recovery: backup pump also failed ({smoothed_flow_inlet:.3f} L/min) "
+            f"Pump recovery: backup pump also failed ({fresh_flow:.3f} L/min) "
             f"- manual intervention required"
         )
         alert_type = 'pump_recovery_failed'
@@ -1794,7 +1810,7 @@ def attempt_pump_recovery():
             send_email_alert(
                 "CRITICAL: Both Pumps Failed - Manual Intervention Required",
                 f"Automatic recovery failed. Neither main nor backup pump restored flow.\n\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Main pump cycles attempted: {PUMP_CYCLE_MAX_ATTEMPTS}\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -1933,6 +1949,10 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# HELP waterflow_pump_recovery_attempted Recovery attempted for current low flow event\n")
             f.write("# TYPE waterflow_pump_recovery_attempted gauge\n")
             f.write(f"waterflow_pump_recovery_attempted{{source=\"waterflow\"}} {1 if recovery_attempted else 0}\n")
+
+            f.write("# HELP waterflow_pump_recovery_failed Both pumps failed to restore flow, manual intervention required\n")
+            f.write("# TYPE waterflow_pump_recovery_failed gauge\n")
+            f.write(f"waterflow_pump_recovery_failed{{source=\"waterflow\"}} {1 if alert_manager.is_active('pump_recovery_failed') else 0}\n")
 
             f.write("# HELP waterflow_leak_detected Leak detection active\n")
             f.write("# TYPE waterflow_leak_detected gauge\n")
