@@ -214,6 +214,7 @@ def _load_thresholds():
     # Battery data
     BATTERY_DATA_FILE    = get_config('paths.battery_data_file',         '/ramdisk/Renogy.prom')
     BATTERY_DATA_TIMEOUT = get_config('paths.battery_data_timeout_seconds', 60)
+    BATTERY_DATA_BOOT_GRACE = get_config('paths.battery_data_boot_grace_seconds', 180)
 
     # Alert timing
     EMAIL_COOLDOWN_MINUTES = get_config('alerts.email_cooldown_minutes', 60)
@@ -1158,6 +1159,13 @@ def read_enclosure_conditions():
 # BATTERY DATA
 # ============================================================================
 
+def _system_uptime_seconds():
+    try:
+        with open('/proc/uptime', 'r') as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return float('inf')
+
 def _alert_battery_data_unavailable(reason):
     """Send a one-time alert when battery SOC data is unavailable."""
     alert_type = 'battery_data_unavailable'
@@ -1183,6 +1191,11 @@ def read_battery_soc():
     global battery_soc, renogy_monitor_healthy, renogy_controller_temp_c
 
     try:
+        uptime = _system_uptime_seconds()
+        if uptime < BATTERY_DATA_BOOT_GRACE:
+            logging.debug(f"Boot grace period active ({uptime:.0f}s uptime), skipping battery data check")
+            return None
+
         if not os.path.exists(BATTERY_DATA_FILE):
             _alert_battery_data_unavailable("battery data file not found (is renogy.py running?)")
             return None
