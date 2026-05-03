@@ -148,7 +148,8 @@ def _load_thresholds():
     global AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
     global PUMP_TEST_INTERVAL, PUMP_TEST_DURATION
     global PUMP_CYCLE_PAUSE, PUMP_RECOVERY_WAIT, PUMP_CYCLE_MAX_ATTEMPTS
-    global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT
+    global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT, BATTERY_DATA_BOOT_GRACE
+    global MAIN_PUMP_TARGET_FLOW, MAIN_PUMP_FLOW_KP, MAIN_PUMP_FLOW_DEADBAND, MAIN_PUMP_FLOW_MAX_STEP
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
     global MAX_TEMP_C, MIN_TEMP_C
     global MAX_HUMIDITY_PCT, MIN_HUMIDITY_PCT
@@ -231,6 +232,12 @@ def _load_thresholds():
     MAX_SPIKE_MULTIPLIER = get_config('waterflow.thresholds.max_spike_multiplier',  5.0)
 
     FLOW_IMBALANCE_PCT   = get_config('waterflow.flow.imbalance_threshold_pct',     30)
+
+    # Closed-loop flow rate control (0 = disabled)
+    MAIN_PUMP_TARGET_FLOW    = get_config('waterflow.main_pump_brushless_pwm.target_flow_lpm',    0.0)
+    MAIN_PUMP_FLOW_KP        = get_config('waterflow.main_pump_brushless_pwm.flow_control_kp',    5.0)
+    MAIN_PUMP_FLOW_DEADBAND  = get_config('waterflow.main_pump_brushless_pwm.flow_deadband_lpm',  0.1)
+    MAIN_PUMP_FLOW_MAX_STEP  = get_config('waterflow.main_pump_brushless_pwm.flow_max_step_pct',  2.0)
 
 _load_thresholds()
 
@@ -821,6 +828,23 @@ def monitor_flow():
         smoothed_flow_inlet  = sum(f * w for f, w in zip(flow_history_inlet,  weights)) / sum(weights)
         smoothed_flow_outlet = sum(f * w for f, w in zip(flow_history_outlet, weights)) / sum(weights)
 
+        # Closed-loop duty cycle control targeting MAIN_PUMP_TARGET_FLOW L/min
+        if (MAIN_PUMP_PWM_ENABLED and MAIN_PUMP_TARGET_FLOW > 0
+                and not backup_pump_active and main_pump_duty_cycle > 0):
+            error = MAIN_PUMP_TARGET_FLOW - smoothed_flow_inlet
+            if abs(error) > MAIN_PUMP_FLOW_DEADBAND:
+                step = max(-MAIN_PUMP_FLOW_MAX_STEP,
+                           min(MAIN_PUMP_FLOW_MAX_STEP, MAIN_PUMP_FLOW_KP * error))
+                new_duty = max(float(MAIN_PUMP_MIN_DUTY),
+                               min(100.0, main_pump_duty_cycle + step))
+                if abs(new_duty - main_pump_duty_cycle) >= 0.5:
+                    logging.debug(
+                        f"Flow control: {smoothed_flow_inlet:.3f} L/min "
+                        f"(target {MAIN_PUMP_TARGET_FLOW:.1f}), "
+                        f"duty {main_pump_duty_cycle:.1f}% -> {new_duty:.1f}%"
+                    )
+                    set_main_pump_speed(new_duty)
+
         # Skip flow alert logic if disabled
         if DISABLE_FLOW_ALERTS:
             logging.debug(
@@ -920,6 +944,14 @@ def monitor_flow():
                 logging.warning(
                     "pump_recovery_failed cleared: flow restored to healthy "
                     f"({smoothed_flow_inlet:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min)"
+                )
+            # Clear stale backup_pump_failover alert when main pump is running with good flow.
+            # This handles the case where the system rebooted and main pump recovered but the
+            # alert persisted in storage from a previous failover event.
+            if not backup_pump_active and alert_manager.clear('backup_pump_failover'):
+                logging.warning(
+                    "backup_pump_failover cleared: main pump running with healthy flow "
+                    f"({smoothed_flow_inlet:.3f} L/min)"
                 )
 
         # Flow imbalance (leak detection)
@@ -1962,6 +1994,9 @@ def write_prometheus_metrics(temps=None, conditions=None):
                 f.write("# HELP waterflow_main_pump_duty_cycle Main pump PWM duty cycle (0-100)\n")
                 f.write("# TYPE waterflow_main_pump_duty_cycle gauge\n")
                 f.write(f"waterflow_main_pump_duty_cycle{{source=\"waterflow\"}} {main_pump_duty_cycle:.1f}\n")
+                f.write("# HELP waterflow_target_flow_lpm Target flow rate for closed-loop control (0=disabled)\n")
+                f.write("# TYPE waterflow_target_flow_lpm gauge\n")
+                f.write(f"waterflow_target_flow_lpm{{source=\"waterflow\"}} {MAIN_PUMP_TARGET_FLOW:.2f}\n")
 
             f.write("# HELP waterflow_pump_recovery_attempted Recovery attempted for current low flow event\n")
             f.write("# TYPE waterflow_pump_recovery_attempted gauge\n")
