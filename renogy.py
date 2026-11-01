@@ -41,6 +41,7 @@ from monitor_common import (
     reload_config,
     validate_config,
     startup_selftest,
+    SustainedLatch,
 )
 
 # ============================================================================
@@ -93,8 +94,11 @@ def _load_thresholds():
     global MAX_REASONABLE_TEMPERATURE, MIN_REASONABLE_TEMPERATURE
     global MAX_REASONABLE_CURRENT, MAX_REASONABLE_POWER
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
+    global LOW_VOLTAGE_SUSTAINED_SECONDS, LOW_VOLTAGE_CLEAR_HYSTERESIS_V
 
     LOW_BATTERY_VOLTAGE_THRESHOLD         = get_config('renogy.thresholds.low_battery_voltage', 12.8)
+    LOW_VOLTAGE_SUSTAINED_SECONDS         = get_config('renogy.thresholds.low_battery_voltage_sustained_seconds', 600)
+    LOW_VOLTAGE_CLEAR_HYSTERESIS_V        = get_config('renogy.thresholds.low_battery_voltage_clear_hysteresis_v', 0.2)
     HIGH_CONTROLLER_TEMPERATURE_THRESHOLD = get_config('renogy.thresholds.high_controller_temp_c', 45.0)
     HIGH_BATTERY_TEMPERATURE_THRESHOLD    = get_config('renogy.thresholds.high_battery_temp_c', 50.0)
     LOW_BATTERY_TEMPERATURE_THRESHOLD     = get_config('renogy.thresholds.low_battery_temp_c', 0.0)
@@ -641,6 +645,28 @@ def _c_to_f(c):
     return c * 9 / 5 + 32
 
 
+_low_v_latch = SustainedLatch()
+
+
+def _effective_voltage(metrics):
+    """Rest-equivalent voltage from the estimator, falling back to raw voltage."""
+    v = metrics.get("battery_voltage_rest_estimate")
+    return v if v is not None else metrics.get("battery_voltage")
+
+
+def _low_voltage_condition(metrics):
+    """Set after LOW_VOLTAGE_SUSTAINED_SECONDS below the threshold; cleared
+    after the same time above threshold + LOW_VOLTAGE_CLEAR_HYSTERESIS_V."""
+    v = _effective_voltage(metrics)
+    if v is None:
+        return _low_v_latch.active
+    return _low_v_latch.update(
+        v < LOW_BATTERY_VOLTAGE_THRESHOLD,
+        v >= LOW_BATTERY_VOLTAGE_THRESHOLD + LOW_VOLTAGE_CLEAR_HYSTERESIS_V,
+        LOW_VOLTAGE_SUSTAINED_SECONDS,
+    )
+
+
 def check_critical_conditions(metrics):
     """Check for critical conditions and send alerts (with throttling)"""
     active_alerts = []
@@ -760,15 +786,19 @@ def check_critical_conditions(metrics):
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-    # Low battery voltage
-    if metrics["battery_voltage"] is not None and metrics["battery_voltage"] < LOW_BATTERY_VOLTAGE_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
+    # Low battery voltage: compares the load-compensated rest-equivalent voltage
+    # (the threshold is an at-rest value), sustained, with hysteresis so that
+    # charging voltage or a load step cannot toggle it.
+    if _low_voltage_condition(metrics) and not DISABLE_LOW_BATTERY_ALERTS:
         alert_type = 'low_battery_voltage'
         should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             subject = "Warning: Low Battery Voltage Alert"
             content = (
                 f"Battery voltage is critically low: {metrics['battery_voltage']:.2f}V\n"
-                f"Threshold: {LOW_BATTERY_VOLTAGE_THRESHOLD}V\n"
+                f"Rest-equivalent voltage: {_effective_voltage(metrics):.2f}V "
+                f"(below threshold for {LOW_VOLTAGE_SUSTAINED_SECONDS // 60} min)\n"
+                f"Threshold: {LOW_BATTERY_VOLTAGE_THRESHOLD}V (at rest)\n"
                 f"Battery SOC: {metrics['battery_soc']}%\n"
                 f"Remaining capacity: {metrics['battery_capacity_ah_remaining']:.1f}Ah / {BATTERY_CAPACITY_AH}Ah\n"
                 f"Solar input: {metrics['solar_input_power']}W\n"

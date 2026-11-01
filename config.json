@@ -23,6 +23,8 @@
     },
     "thresholds": {
       "low_battery_voltage": 12.8,
+      "low_battery_voltage_sustained_seconds": 600,
+      "low_battery_voltage_clear_hysteresis_v": 0.2,
       "high_controller_temp_c": 45.0,
       "high_battery_temp_c": 50.0,
       "low_battery_temp_c": 0.0,
