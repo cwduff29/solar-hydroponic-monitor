@@ -359,6 +359,10 @@ flow_measurement_active = False
 flow_measurement_start_time = None
 count_inlet = 0
 count_outlet = 0
+_inlet_falling_time  = 0.0
+_outlet_falling_time = 0.0
+# Minimum pulse LOW duration to accept as real flow; rejects sub-ms EMI from 1kHz PWM
+PULSE_MIN_WIDTH_S = 0.010
 
 # Smoothed flow values (weighted moving average)
 smoothed_flow_inlet = 0.0
@@ -392,6 +396,9 @@ last_pump_test = 0
 # Pump recovery state
 recovery_attempted = False
 backup_pump_active = False
+
+# Closed-loop capacity tracking
+pump_at_max_duty_start_time = None
 
 # Prometheus metrics
 last_prometheus_write = 0
@@ -531,27 +538,39 @@ def setup_gpio():
             GPIO.remove_event_detect(pin)
         except Exception:
             pass
-    GPIO.add_event_detect(FLOW_SENSOR_INLET_GPIO,  GPIO.FALLING, callback=countPulse_inlet)
-    GPIO.add_event_detect(FLOW_SENSOR_OUTLET_GPIO, GPIO.FALLING, callback=countPulse_outlet)
+    GPIO.add_event_detect(FLOW_SENSOR_INLET_GPIO,  GPIO.BOTH, callback=countPulse_inlet)
+    GPIO.add_event_detect(FLOW_SENSOR_OUTLET_GPIO, GPIO.BOTH, callback=countPulse_outlet)
 
 # ============================================================================
 # FLOW SENSOR INTERRUPTS (thread-safe via lock - #1)
 # ============================================================================
 
 def countPulse_inlet(channel):
-    """Interrupt handler for inlet flow sensor"""
-    global count_inlet
-    with _flow_lock:
-        if flow_measurement_active:
-            count_inlet += 1
+    """Interrupt handler for inlet flow sensor — counts only pulses with LOW width >= PULSE_MIN_WIDTH_S"""
+    global count_inlet, _inlet_falling_time
+    if GPIO.input(channel) == GPIO.LOW:
+        _inlet_falling_time = time.time()
+    else:
+        t = time.time()
+        if _inlet_falling_time > 0 and (t - _inlet_falling_time) >= PULSE_MIN_WIDTH_S:
+            with _flow_lock:
+                if flow_measurement_active:
+                    count_inlet += 1
+        _inlet_falling_time = 0.0
 
 
 def countPulse_outlet(channel):
-    """Interrupt handler for outlet flow sensor"""
-    global count_outlet
-    with _flow_lock:
-        if flow_measurement_active:
-            count_outlet += 1
+    """Interrupt handler for outlet flow sensor — counts only pulses with LOW width >= PULSE_MIN_WIDTH_S"""
+    global count_outlet, _outlet_falling_time
+    if GPIO.input(channel) == GPIO.LOW:
+        _outlet_falling_time = time.time()
+    else:
+        t = time.time()
+        if _outlet_falling_time > 0 and (t - _outlet_falling_time) >= PULSE_MIN_WIDTH_S:
+            with _flow_lock:
+                if flow_measurement_active:
+                    count_outlet += 1
+        _outlet_falling_time = 0.0
 
 
 # ============================================================================
@@ -643,11 +662,12 @@ def validate_flow_reading(flow_inlet, flow_outlet):
     # Spike detection — skip when smoothed is 0 (startup) or too small to be a reliable baseline.
     # If smoothed drops near zero (e.g. after aerator suppression or a restart), all real readings
     # would be rejected as spikes, permanently locking out updates. Only apply when baseline is
-    # large enough that a valid reading at MIN_FLOW_THRESHOLD wouldn't be falsely flagged.
+    # at MIN_FLOW_THRESHOLD — if smoothed is below that, the pump isn't confirmed running yet and
+    # spike-checking would reject real flow readings coming in after a restart or line clean.
     # Also skip while backup_pump_active: the backup pump may have significantly different flow
     # characteristics than the main pump, so the main pump's smoothed baseline is not a valid
     # reference and would cause genuine backup pump readings to be rejected as spikes.
-    spike_min_baseline = MIN_FLOW_THRESHOLD / MAX_SPIKE_MULTIPLIER
+    spike_min_baseline = MIN_FLOW_THRESHOLD
     if not backup_pump_active:
         if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
             issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
@@ -773,6 +793,7 @@ def monitor_flow():
     global low_flow_start_time, flow_imbalance_start_time
     global low_flow_alert_sent, leak_alert_sent
     global recovery_attempted, backup_pump_active
+    global pump_at_max_duty_start_time
     global consecutive_failures
 
     try:
@@ -844,6 +865,36 @@ def monitor_flow():
                         f"duty {main_pump_duty_cycle:.1f}% -> {new_duty:.1f}%"
                     )
                     set_main_pump_speed(new_duty)
+
+        # Track when pump is maxed out but still below target (capacity exhausted)
+        if (MAIN_PUMP_PWM_ENABLED and MAIN_PUMP_TARGET_FLOW > 0
+                and not backup_pump_active and main_pump_duty_cycle > 0):
+            at_max = (main_pump_duty_cycle >= 99.5
+                      and smoothed_flow_inlet < MAIN_PUMP_TARGET_FLOW - MAIN_PUMP_FLOW_DEADBAND)
+            if at_max:
+                if pump_at_max_duty_start_time is None:
+                    pump_at_max_duty_start_time = time.time()
+                elif time.time() - pump_at_max_duty_start_time > 300:
+                    alert_type = 'pump_capacity_exhausted'
+                    should_send, reason = alert_manager.should_send(alert_type)
+                    if should_send:
+                        send_email_alert(
+                            "Warning: Pump at Maximum Capacity — Flow Below Target",
+                            f"The pump duty cycle has been at 100% for over 5 minutes but flow "
+                            f"is still below the target.\n\n"
+                            f"Target flow:   {MAIN_PUMP_TARGET_FLOW:.1f} L/min\n"
+                            f"Current flow:  {smoothed_flow_inlet:.3f} L/min\n"
+                            f"Duty cycle:    {main_pump_duty_cycle:.1f}%\n\n"
+                            f"The pump is running at maximum speed but cannot reach the target. "
+                            f"This may indicate a developing blockage, pump wear, or a target "
+                            f"that exceeds the pump's current capacity.\n\n"
+                            f"Alert reason: {reason}\n"
+                            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        alert_manager.mark_sent(alert_type)
+            else:
+                pump_at_max_duty_start_time = None
+                alert_manager.clear('pump_capacity_exhausted')
 
         # Skip flow alert logic if disabled
         if DISABLE_FLOW_ALERTS:
@@ -1997,6 +2048,10 @@ def write_prometheus_metrics(temps=None, conditions=None):
                 f.write("# HELP waterflow_target_flow_lpm Target flow rate for closed-loop control (0=disabled)\n")
                 f.write("# TYPE waterflow_target_flow_lpm gauge\n")
                 f.write(f"waterflow_target_flow_lpm{{source=\"waterflow\"}} {MAIN_PUMP_TARGET_FLOW:.2f}\n")
+                f.write("# HELP waterflow_pump_at_max_duty Pump at 100% duty cycle but flow still below target\n")
+                f.write("# TYPE waterflow_pump_at_max_duty gauge\n")
+                f.write(f"waterflow_pump_at_max_duty{{source=\"waterflow\"}} "
+                        f"{1 if pump_at_max_duty_start_time is not None else 0}\n")
 
             f.write("# HELP waterflow_pump_recovery_attempted Recovery attempted for current low flow event\n")
             f.write("# TYPE waterflow_pump_recovery_attempted gauge\n")
