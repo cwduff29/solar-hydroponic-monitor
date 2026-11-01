@@ -172,6 +172,7 @@ class AlertManager:
                 'last_sent': None,
                 'first_detected': None,
                 'active': False,
+                'last_cleared': None,
             }
 
     def _serialize(self):
@@ -181,6 +182,7 @@ class AlertManager:
                 'last_sent': s['last_sent'].isoformat() if s['last_sent'] else None,
                 'first_detected': s['first_detected'].isoformat() if s['first_detected'] else None,
                 'active': s['active'],
+                'last_cleared': s['last_cleared'].isoformat() if s.get('last_cleared') else None,
             }
         return result
 
@@ -190,8 +192,10 @@ class AlertManager:
             self._state[atype]['active'] = s.get('active', False)
             ls = s.get('last_sent')
             fd = s.get('first_detected')
+            lc = s.get('last_cleared')
             self._state[atype]['last_sent'] = datetime.fromisoformat(ls) if ls else None
             self._state[atype]['first_detected'] = datetime.fromisoformat(fd) if fd else None
+            self._state[atype]['last_cleared'] = datetime.fromisoformat(lc) if lc else None
 
     # ------------------------------------------------------------------
     # Public API
@@ -296,20 +300,27 @@ class AlertManager:
         """
         Clear an alert when its condition resolves.
 
-        Returns True if the alert was previously active (i.e., was just cleared).
+        Returns True if the alert was previously active AND the recovery
+        notification cooldown has expired (i.e., a recovery email should be sent).
+        The alert state is always cleared regardless of the cooldown.
         """
+        do_save = False
+        do_notify = False
         with self._lock:
             self._init_type(alert_type)
             if self._state[alert_type]['active']:
                 self._state[alert_type]['active'] = False
                 self._state[alert_type]['first_detected'] = None
                 do_save = True
-            else:
-                do_save = False
+                now = datetime.now()
+                last_cleared = self._state[alert_type].get('last_cleared')
+                cooldown = timedelta(minutes=self._cooldown_minutes)
+                if last_cleared is None or (now - last_cleared) >= cooldown:
+                    self._state[alert_type]['last_cleared'] = now
+                    do_notify = True
         if do_save:
             self.save()
-            return True
-        return False
+        return do_notify
 
     def is_active(self, alert_type):
         """Return True if the alert_type is currently active."""
