@@ -36,7 +36,7 @@
     },
     "relay": {
       "main_pump_terminal": "NC",
-      "backup_pump_terminal": "NO",
+      "backup_pump_terminal": "NC",
       "aeration_terminal": "NO",
       "fan_terminal": "NC",
       "active_low_board": true
@@ -138,11 +138,15 @@
       "max_consecutive_failures": 5
     },
     "main_pump_brushless_pwm": {
-      "enabled": false,
+      "enabled": true,
       "pwm_gpio": 12,
       "frequency_hz": 1000,
-      "default_duty_cycle_pct": 100,
-      "min_duty_cycle_pct": 0
+      "default_duty_cycle_pct": 70,
+      "min_duty_cycle_pct": 50,
+      "target_flow_lpm": 0,
+      "flow_control_kp": 1.0,
+      "flow_deadband_lpm": 0.1,
+      "flow_max_step_pct": 2.0
     }
   },
   "alerts": {
