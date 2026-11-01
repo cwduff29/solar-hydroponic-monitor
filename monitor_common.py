@@ -342,6 +342,43 @@ class AlertManager:
 
 
 # ============================================================================
+# TIME-HYSTERESIS LATCH
+# ============================================================================
+
+class SustainedLatch:
+    """
+    Boolean condition with time hysteresis: becomes active after the set
+    condition has held for hold_seconds, and inactive after the clear
+    condition has held for hold_seconds. When neither holds (dead band),
+    the state is kept and both timers restart.
+    """
+
+    def __init__(self):
+        self.active = False
+        self._set_since = None
+        self._clear_since = None
+
+    def update(self, set_cond, clear_cond, hold_seconds, now=None):
+        now = time.monotonic() if now is None else now
+        if set_cond:
+            self._clear_since = None
+            if self._set_since is None:
+                self._set_since = now
+            if now - self._set_since >= hold_seconds:
+                self.active = True
+        elif clear_cond:
+            self._set_since = None
+            if self._clear_since is None:
+                self._clear_since = now
+            if now - self._clear_since >= hold_seconds:
+                self.active = False
+        else:
+            self._set_since = None
+            self._clear_since = None
+        return self.active
+
+
+# ============================================================================
 # HARDWARE WATCHDOG
 # ============================================================================
 
