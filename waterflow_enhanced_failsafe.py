@@ -76,7 +76,7 @@ DISABLE_FAN          = get_config('waterflow.maintenance.disable_fan',          
 # ============================================================================
 
 MAIN_PUMP_TERMINAL   = get_config('waterflow.relay.main_pump_terminal',   'NC')
-BACKUP_PUMP_TERMINAL = get_config('waterflow.relay.backup_pump_terminal', 'NO')
+BACKUP_PUMP_TERMINAL = get_config('waterflow.relay.backup_pump_terminal', 'NC')
 AERATION_TERMINAL    = get_config('waterflow.relay.aeration_terminal',    'NO')
 FAN_TERMINAL         = get_config('waterflow.relay.fan_terminal',         'NC')
 RELAY_BOARD_ACTIVE_LOW = get_config('waterflow.relay.active_low_board',   True)
