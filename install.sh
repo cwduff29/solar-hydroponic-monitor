@@ -10,6 +10,13 @@ SERVICE_USER="${SUDO_USER:-pi}"
 CREDS_DIR="/etc/solar-hydroponic"
 CREDS_FILE="$CREDS_DIR/credentials.env"
 
+# Local Prometheus on the Pi is optional and off by default: the Pi is scraped
+# by a central Prometheus, and a local TSDB is the largest source of SD writes.
+#   sudo INSTALL_LOCAL_PROMETHEUS=1 bash install.sh
+INSTALL_LOCAL_PROMETHEUS="${INSTALL_LOCAL_PROMETHEUS:-0}"
+# Hosts allowed to reach node_exporter (:9100), and :9090 if local Prometheus is on.
+SCRAPE_HOSTS="${SCRAPE_HOSTS:-192.168.99.201 192.168.99.224}"
+
 # Check root
 if [[ $EUID -ne 0 ]]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -22,6 +29,8 @@ echo "================================================="
 echo " Install directory : $INSTALL_DIR"
 echo " Service user      : $SERVICE_USER"
 echo " Credentials file  : $CREDS_FILE"
+echo " Local Prometheus  : $([[ $INSTALL_LOCAL_PROMETHEUS == 1 ]] && echo yes || echo 'no (INSTALL_LOCAL_PROMETHEUS=1 to enable)')"
+echo " Scrape hosts      : $SCRAPE_HOSTS"
 echo "================================================="
 echo ""
 
@@ -108,20 +117,30 @@ echo "      node_exporter installed and configured."
 echo "      Textfile collector : /ramdisk/*.prom"
 echo "      Metrics endpoint   : http://$(hostname -I | awk '{print $1}'):9100/metrics"
 
-# --- [3/13] Prometheus ---
-echo "[3/13] Installing Prometheus..."
-apt-get install -y prometheus
+# --- [3/13] Prometheus (optional) ---
+if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+    echo "[3/13] Installing local Prometheus..."
+    apt-get install -y prometheus
 
-# Install our scrape config
-mkdir -p /etc/prometheus
-cp "$INSTALL_DIR/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
-chown prometheus:prometheus /etc/prometheus/prometheus.yml 2>/dev/null || true
-systemctl enable prometheus
-systemctl restart prometheus
-echo "      Prometheus installed and configured."
-echo "      Scraping            : localhost:9100"
-echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
-echo "      NOTE: Point your Grafana datasource at http://<PI_IP>:9090"
+    # Install our scrape config
+    mkdir -p /etc/prometheus
+    cp "$INSTALL_DIR/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
+    chown prometheus:prometheus /etc/prometheus/prometheus.yml 2>/dev/null || true
+    systemctl enable prometheus
+    systemctl restart prometheus
+    echo "      Prometheus installed and configured."
+    echo "      Scraping            : localhost:9100"
+    echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
+else
+    echo "[3/13] Local Prometheus skipped (scrape :9100 from your central Prometheus)."
+    if systemctl list-unit-files prometheus.service &>/dev/null \
+            && systemctl is-enabled --quiet prometheus 2>/dev/null; then
+        systemctl disable --now prometheus
+        echo "      Existing local prometheus service stopped and disabled."
+        echo "      Its data in /var/lib/prometheus was left in place; remove it with:"
+        echo "        sudo apt-get purge prometheus && sudo rm -rf /var/lib/prometheus"
+    fi
+fi
 
 # --- [4/13] Firewall (ufw) ---
 echo "[4/13] Configuring firewall..."
@@ -129,24 +148,30 @@ if command -v ufw &>/dev/null; then
     # Ensure SSH is allowed before enabling ufw (don't lock ourselves out)
     ufw allow OpenSSH 2>/dev/null || ufw allow 22/tcp
 
-    # Allow Prometheus and node_exporter from local network
-    # Default to whole RFC1918 private ranges; user can tighten later
-    ufw allow from 10.0.0.0/8 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 172.16.0.0/12 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 192.168.0.0/16 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 10.0.0.0/8 to any port 9100 comment 'node_exporter (solar monitor)'
-    ufw allow from 172.16.0.0/12 to any port 9100 comment 'node_exporter (solar monitor)'
-    ufw allow from 192.168.0.0/16 to any port 9100 comment 'node_exporter (solar monitor)'
+    # Remove the broad private-range rules older versions of this script added
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        for port in 9090 9100; do
+            ufw delete allow from "$net" to any port "$port" >/dev/null 2>&1 || true
+        done
+    done
+
+    # Allow only the scrape/Grafana hosts (ufw skips rules that already exist)
+    for host in $SCRAPE_HOSTS; do
+        ufw allow from "$host" to any port 9100 proto tcp comment 'node_exporter (solar monitor)'
+        if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+            ufw allow from "$host" to any port 9090 proto tcp comment 'Prometheus (solar monitor)'
+        else
+            ufw delete allow from "$host" to any port 9090 proto tcp >/dev/null 2>&1 || true
+        fi
+    done
 
     # Enable ufw non-interactively
     ufw --force enable
-    echo "      Firewall configured. Ports 9090 and 9100 open to private networks."
-    echo "      To restrict to a specific host:"
-    echo "        sudo ufw delete allow from 192.168.0.0/16 to any port 9090"
-    echo "        sudo ufw allow from <HOST_IP> to any port 9090"
+    echo "      Firewall configured. Port 9100$([[ $INSTALL_LOCAL_PROMETHEUS == 1 ]] && echo ' and 9090') open to: $SCRAPE_HOSTS"
+    echo "      Change the list with: sudo SCRAPE_HOSTS='a.b.c.d e.f.g.h' bash install.sh"
 else
     echo "      ufw not found — skipping firewall setup."
-    echo "      Manually allow ports 9090 and 9100 from your Grafana host."
+    echo "      Manually allow port 9100 from: $SCRAPE_HOSTS"
 fi
 
 # --- [5/13] Hardware interfaces ---
@@ -281,21 +306,23 @@ echo "        sudo nano $CREDS_FILE"
 echo "   2. Reboot to apply interface, watchdog, and group changes:"
 echo "        sudo reboot"
 echo ""
-echo " Grafana datasource:"
-echo "   Add a Prometheus datasource pointing at:"
-echo "   http://$(hostname -I | awk '{print $1}'):9090"
+echo " Prometheus scrape job (on your central Prometheus):"
+echo "   - job_name: solar_hydroponic"
+echo "     static_configs: [{targets: ['$(hostname -I | awk '{print $1}'):9100']}]"
 echo ""
 echo " Config reload without restart (SIGHUP):"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value renogy)"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value waterflow)"
 echo ""
 echo " Service management:"
-echo "   sudo systemctl status renogy waterflow battery_shutdown prometheus prometheus-node-exporter"
+echo "   sudo systemctl status renogy waterflow battery_shutdown prometheus-node-exporter"
 echo "   sudo journalctl -u renogy -f"
 echo "   sudo journalctl -u waterflow -f"
 echo "   sudo journalctl -u battery_shutdown -f"
 echo ""
 echo " Verify metrics:"
 echo "   curl http://localhost:9100/metrics | grep waterflow_inlet_lpm"
-echo "   curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm"
+if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+    echo "   curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm"
+fi
 echo ""
