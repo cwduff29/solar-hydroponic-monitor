@@ -1456,11 +1456,7 @@ def control_aeration():
             alert_manager.mark_sent(alert_type)
     else:
         alert_manager.clear('aeration_disabled')
-        if mode.startswith("reduced"):
-            logging.warning(
-                f"Aeration load shedding active: reduced schedule "
-                f"(SOC={soc}%, mode={mode})"
-            )
+        # Tier changes are logged once above; nothing to log on every 1 s loop.
 
     current_time = time.time()
     time_in_state = current_time - last_aeration_toggle
@@ -1795,6 +1791,9 @@ def check_humidity_alerts(conditions):
 # PUMP TESTING
 # ============================================================================
 
+_last_pump_test_skip_log = 0.0
+
+
 def should_run_pump_test():
     """Check if backup pump test is due"""
     global last_pump_test
@@ -1805,16 +1804,22 @@ def should_run_pump_test():
     if last_pump_test == 0:
         return False
 
-    # Skip pump test if battery SOC is too low (#14)
-    soc = read_battery_soc()
-    if soc is not None and soc < BATTERY_SKIP_PUMP_TEST_BELOW:
-        logging.warning(
-            f"Skipping pump test: battery SOC {soc:.1f}% < "
-            f"{BATTERY_SKIP_PUMP_TEST_BELOW}% (threshold)"
-        )
+    if time.time() - last_pump_test <= PUMP_TEST_INTERVAL:
         return False
 
-    return time.time() - last_pump_test > PUMP_TEST_INTERVAL
+    # Skip pump test if battery SOC is too low (#14); log at most hourly while overdue
+    global _last_pump_test_skip_log
+    soc = read_battery_soc()
+    if soc is not None and soc < BATTERY_SKIP_PUMP_TEST_BELOW:
+        if time.time() - _last_pump_test_skip_log >= 3600:
+            logging.warning(
+                f"Skipping pump test: battery SOC {soc:.1f}% < "
+                f"{BATTERY_SKIP_PUMP_TEST_BELOW}% (threshold)"
+            )
+            _last_pump_test_skip_log = time.time()
+        return False
+
+    return True
 
 
 def test_backup_pump():
