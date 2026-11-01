@@ -194,8 +194,11 @@
     "interval_seconds": 30
   },
   "shutdown": {
+    "mode": "alert",
     "critical_soc_pct": 5,
-    "sustained_seconds": 120,
+    "min_confidence": 0.5,
+    "max_rest_voltage": 12.0,
+    "sustained_seconds": 600,
     "recovery_soc_pct": 15
   },
   "system": {
