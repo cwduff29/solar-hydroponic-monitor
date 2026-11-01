@@ -39,6 +39,7 @@ import traceback
 from collections import deque
 from datetime import datetime, timedelta
 
+import load_shedding
 from monitor_common import (
     AlertManager,
     send_email,
@@ -139,6 +140,7 @@ def _load_thresholds():
     global SMART_COOLING_MIN_C, SMART_HEATING_MAX_C
     global HUMIDITY_WARNING, HUMIDITY_CRITICAL, HUMIDITY_EMERGENCY
     global BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE, BATTERY_THRESHOLD_NORMAL
+    global BATTERY_TIER_HYSTERESIS
     global BATTERY_SKIP_PUMP_TEST_BELOW
     global AERATION_ON_DURATION, AERATION_OFF_DURATION
     global AERATION_ON_DURATION_REDUCED, AERATION_OFF_DURATION_REDUCED
@@ -188,6 +190,7 @@ def _load_thresholds():
     BATTERY_THRESHOLD_REDUCE       = get_config('waterflow.battery_load_shedding.reduce_threshold_pct',  50)
     BATTERY_THRESHOLD_NORMAL       = get_config('waterflow.battery_load_shedding.normal_threshold_pct',  70)
     BATTERY_SKIP_PUMP_TEST_BELOW   = get_config('waterflow.battery_load_shedding.skip_pump_test_below_pct', 50)
+    BATTERY_TIER_HYSTERESIS        = get_config('waterflow.battery_load_shedding.tier_hysteresis_pct', 2)
 
     # Aeration timing
     AERATION_ON_DURATION         = get_config('waterflow.aeration.on_duration_seconds',          360)
@@ -381,6 +384,8 @@ aeration_state = False
 last_aeration_toggle = time.time()
 aeration_mode = "normal"
 _aeration_soc_tier = None   # Track SOC tier to detect tier changes
+load_shed_tier = load_shedding.TIER_NORMAL   # 0 normal, 1 reduced, 2 disabled
+aeration_temp_tier = None   # hot / warm / moderate / cool, None without water sensor
 
 # Fan state (start OFF, let control_ventilation_fan() turn it on based on temperature)
 fan_running = False
@@ -1338,19 +1343,20 @@ def read_battery_soc():
 
 def get_aeration_by_temperature_c(water_temp_c):
     """Get aeration on/off timing (seconds) based on water temperature (degrees C)."""
-    if water_temp_c > WATER_TEMP_HOT_C:
-        return AERATION_TIER_HOT_ON, AERATION_TIER_HOT_OFF
-    elif water_temp_c > WATER_TEMP_WARM_C:
-        return AERATION_TIER_WARM_ON, AERATION_TIER_WARM_OFF
-    elif water_temp_c > WATER_TEMP_MODERATE_C:
-        return AERATION_TIER_MODERATE_ON, AERATION_TIER_MODERATE_OFF
-    else:
-        return AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
+    tier = load_shedding.temperature_tier(
+        water_temp_c, WATER_TEMP_HOT_C, WATER_TEMP_WARM_C, WATER_TEMP_MODERATE_C)
+    return {
+        'hot':      (AERATION_TIER_HOT_ON, AERATION_TIER_HOT_OFF),
+        'warm':     (AERATION_TIER_WARM_ON, AERATION_TIER_WARM_OFF),
+        'moderate': (AERATION_TIER_MODERATE_ON, AERATION_TIER_MODERATE_OFF),
+        'cool':     (AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF),
+    }[tier]
 
 
 def control_aeration():
     """Control aeration pump with battery-based load shedding"""
     global aeration_state, last_aeration_toggle, aeration_mode, _aeration_soc_tier
+    global load_shed_tier, aeration_temp_tier
 
     if DISABLE_AERATOR:
         set_aeration(False)
@@ -1363,38 +1369,41 @@ def control_aeration():
     soc = read_battery_soc()
     temps = read_all_temperatures()
 
-    if soc is not None and soc < BATTERY_THRESHOLD_DISABLE:
-        mode = "disabled"
-        on_duration = 0
-        off_duration = 9999999
-        new_tier = "disabled"
-    elif soc is not None and soc < BATTERY_THRESHOLD_REDUCE:
-        mode = "reduced"
-        on_duration = AERATION_ON_DURATION_REDUCED
-        off_duration = AERATION_OFF_DURATION_REDUCED
-        new_tier = "reduced"
-    else:
-        mode = "normal"
-        on_duration = AERATION_ON_DURATION
-        off_duration = AERATION_OFF_DURATION
-        new_tier = "normal"
+    # The SOC tier caps the temperature schedule; it never lengthens on-time.
+    prev_tier = None if _aeration_soc_tier is None else load_shed_tier
+    load_shed_tier = load_shedding.soc_tier(
+        soc, prev_tier, BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE,
+        BATTERY_TIER_HYSTERESIS)
+    new_tier = load_shedding.TIER_NAMES[load_shed_tier]
+
+    water_key = 'water' if 'water' in temps else 'reservoir' if 'reservoir' in temps else None
+    temp_schedule = None
+    aeration_temp_tier = None
+    if sensors_available['water_temp'] and water_key:
+        temp_schedule = get_aeration_by_temperature_c(temps[water_key])
+        aeration_temp_tier = load_shedding.temperature_tier(
+            temps[water_key], WATER_TEMP_HOT_C, WATER_TEMP_WARM_C, WATER_TEMP_MODERATE_C)
+
+    on_duration, off_duration = load_shedding.aeration_schedule(
+        load_shed_tier,
+        (AERATION_ON_DURATION, AERATION_OFF_DURATION),
+        (AERATION_ON_DURATION_REDUCED, AERATION_OFF_DURATION_REDUCED),
+        temp_schedule,
+    )
+    mode = new_tier
 
     # Reset the aeration timer when SOC tier changes so the new schedule starts
     # cleanly rather than inheriting a mid-cycle offset from the old schedule.
     if new_tier != _aeration_soc_tier:
         if _aeration_soc_tier is not None:
             logging.warning(
-                f"Aeration SOC tier changed: {_aeration_soc_tier} → {new_tier} "
-                f"(SOC={soc}%) — resetting aeration timer"
+                f"Load shedding tier changed: {_aeration_soc_tier} → {new_tier} "
+                f"(SOC={soc}%, aerator "
+                f"{f'on {on_duration}s / off {off_duration}s' if on_duration else 'off'}) "
+                f"— resetting aeration timer"
             )
         _aeration_soc_tier = new_tier
         last_aeration_toggle = time.time()
-
-    # Temperature-based adjustment (all thresholds in C now - #13)
-    water_key = 'water' if 'water' in temps else 'reservoir' if 'reservoir' in temps else None
-    if sensors_available['water_temp'] and water_key:
-        on_duration, off_duration = get_aeration_by_temperature_c(temps[water_key])
-        mode = f"{mode}-{temps[water_key]:.1f}C"
 
     # Alert if load shedding active
     if mode.startswith("disabled"):
@@ -1426,11 +1435,10 @@ def control_aeration():
             aeration_state = False
             last_aeration_toggle = current_time
     else:
-        if time_in_state >= off_duration:
-            if on_duration > 0:
-                set_aeration(True)
-                aeration_state = True
-                last_aeration_toggle = current_time
+        if on_duration > 0 and time_in_state >= off_duration:
+            set_aeration(True)
+            aeration_state = True
+            last_aeration_toggle = current_time
 
     aeration_mode = mode
 
@@ -2099,6 +2107,15 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# TYPE aeration_mode gauge\n")
             f.write(f'aeration_mode{{mode="{aeration_mode}",source="waterflow"}} 1\n')
 
+            f.write("# HELP waterflow_load_shed_tier Battery load-shedding tier (0=normal, 1=reduced, 2=disabled)\n")
+            f.write("# TYPE waterflow_load_shed_tier gauge\n")
+            f.write(f'waterflow_load_shed_tier{{source="waterflow"}} {load_shed_tier}\n')
+
+            if aeration_temp_tier is not None:
+                f.write("# HELP aeration_temp_tier Aeration water-temperature tier\n")
+                f.write("# TYPE aeration_temp_tier gauge\n")
+                f.write(f'aeration_temp_tier{{tier="{aeration_temp_tier}",source="waterflow"}} 1\n')
+
             # Fan
             f.write("# HELP fan_state Ventilation fan state\n")
             f.write("# TYPE fan_state gauge\n")
@@ -2366,6 +2383,9 @@ def main():
 
     # Load alert state
     alert_manager.load()
+    # Alert types no longer raised by this code but still present in old state files
+    for retired in ('load_shed_active',):
+        alert_manager.forget(retired)
 
     # Start hardware watchdog (#8)
     watchdog = None

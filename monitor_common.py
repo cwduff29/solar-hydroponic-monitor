@@ -322,6 +322,14 @@ class AlertManager:
             self.save()
         return do_notify
 
+    def forget(self, alert_type):
+        """Drop an alert type from state (e.g. a retired type restored from disk)."""
+        with self._lock:
+            removed = self._state.pop(alert_type, None) is not None
+        if removed:
+            self.save()
+        return removed
+
     def is_active(self, alert_type):
         """Return True if the alert_type is currently active."""
         with self._lock:

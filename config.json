@@ -126,7 +126,8 @@
       "disable_threshold_pct": 30,
       "reduce_threshold_pct": 50,
       "normal_threshold_pct": 70,
-      "skip_pump_test_below_pct": 50
+      "skip_pump_test_below_pct": 50,
+      "tier_hysteresis_pct": 2
     },
     "pump": {
       "test_interval_seconds": 172800,
