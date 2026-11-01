@@ -76,11 +76,20 @@ BATTERY_CAPACITY_AH = get_config('renogy.battery_capacity_ah', 50)
 BATTERY_NOMINAL_VOLTAGE = get_config('renogy.battery_nominal_voltage', 12.8)
 BATTERY_CHEMISTRY = get_config('renogy.battery_chemistry', 'lifepo4')
 
-# Voltage-to-SOC lookup tables (open-circuit voltage at ~0.1C load, 12 V 4S pack)
+# Voltage-to-SOC lookup tables for a 12 V pack.
+# These are AT-REST tables: terminal voltage after the battery has sat for
+# >= 1 h with ~no current. Under load or charge the terminal voltage differs
+# by I * R_internal (~26 mOhm measured on this pack), so compensate before
+# looking a voltage up. The LiFePO4 curve is nearly flat between ~13.0 V and
+# ~13.35 V, where voltage says little about SOC.
+# 12.80 V = 20 % here, matching renogy.thresholds.low_battery_voltage (12.8 V)
+# and low_battery_soc_pct (20 %).
 _SOC_TABLES = {
     'lifepo4': [
-        (13.60, 100), (13.40, 90), (13.30, 70), (13.20, 50),
-        (13.10, 30), (13.00, 20), (12.80, 10), (12.50,  5), (12.00,  0),
+        (13.60, 100), (13.40, 98), (13.30, 90), (13.25, 80), (13.20, 70),
+        (13.15, 55), (13.10, 40), (13.00, 30), (12.90, 25), (12.80, 20),
+        (12.60, 14), (12.40,  9), (12.20,  6), (12.00,  4), (11.50,  2),
+        (10.00,  0),
     ],
     'lead_acid': [
         (12.70, 100), (12.50, 90), (12.42, 75), (12.32, 50),
