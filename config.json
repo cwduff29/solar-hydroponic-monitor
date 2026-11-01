@@ -129,6 +129,25 @@
       "skip_pump_test_below_pct": 50,
       "tier_hysteresis_pct": 2
     },
+    "main_pump_low_soc": {
+      "min_confidence": 0.3,
+      "reduced_speed": {
+        "enabled": false,
+        "enter_below_soc_pct": 40,
+        "exit_above_soc_pct": 50,
+        "duty_cycle_pct": 55
+      },
+      "cycling": {
+        "enabled": false,
+        "enter_below_soc_pct": 20,
+        "exit_above_soc_pct": 30,
+        "on_minutes": 15,
+        "off_minutes": 15,
+        "max_off_minutes": 30,
+        "skip_at_or_above_water_temp_c": 22.8,
+        "restart_grace_seconds": 60
+      }
+    },
     "pump": {
       "test_interval_seconds": 172800,
       "test_duration_seconds": 60,
