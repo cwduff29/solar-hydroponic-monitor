@@ -5,6 +5,22 @@
     "battery_capacity_ah": 50,
     "battery_nominal_voltage": 12.8,
     "battery_chemistry": "lifepo4",
+    "soc_estimator": {
+      "enabled": true,
+      "state_file": "/var/lib/renogy/soc_estimator.json",
+      "persist_interval_seconds": 300,
+      "charge_current_source": "solar_power",
+      "mppt_efficiency": 0.967,
+      "r_internal_ohm": 0.026,
+      "charge_efficiency": 0.99,
+      "unmetered_load_a": 0.0,
+      "full_charge_voltage": 14.0,
+      "full_charge_hold_seconds": 600,
+      "rest_full_voltage": 13.4,
+      "rest_full_hold_seconds": 1800,
+      "low_clamp_soc_pct": 20.0,
+      "low_clamp_hold_seconds": 300
+    },
     "thresholds": {
       "low_battery_voltage": 12.8,
       "high_controller_temp_c": 45.0,
