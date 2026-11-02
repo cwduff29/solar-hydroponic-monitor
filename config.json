@@ -88,7 +88,8 @@
       "water_temp_moderate_c": 20.0
     },
     "bme280": {
-      "i2c_address": 118
+      "i2c_address": 118,
+      "permission_wait_seconds": 30
     },
     "fan": {
       "temp_on_c": 26.7,
