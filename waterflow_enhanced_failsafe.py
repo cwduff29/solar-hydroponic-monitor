@@ -470,6 +470,19 @@ alert_manager = AlertManager(
 
 alert_manager.load()
 
+
+def sync_alert_flags():
+    """
+    Rebuild the in-memory "alert sent" flags from the persisted alert state.
+
+    The flags reset to False on every restart while AlertManager restores
+    'active' from disk; without this, an alert that was active at shutdown
+    could never be cleared (the clear paths are gated on the flags).
+    """
+    global leak_alert_sent, low_flow_alert_sent
+    leak_alert_sent = alert_manager.is_active('leak_detected')
+    low_flow_alert_sent = alert_manager.is_active('low_flow')
+
 # ============================================================================
 # SIGHUP HANDLER
 # ============================================================================
@@ -994,7 +1007,7 @@ def monitor_flow():
                         alert_manager.mark_sent(alert_type)
                         low_flow_alert_sent = True
         else:
-            if low_flow_start_time is not None:
+            if low_flow_start_time is not None or low_flow_alert_sent:
                 if backup_pump_active:
                     logging.warning(
                         f"Flow restored on backup pump ({smoothed_flow_inlet:.3f} L/min) "
@@ -1071,7 +1084,7 @@ def monitor_flow():
                     alert_manager.mark_sent(alert_type)
                     leak_alert_sent = True
         else:
-            if flow_imbalance_start_time is not None:
+            if flow_imbalance_start_time is not None or leak_alert_sent:
                 if leak_alert_sent and alert_manager.clear('leak_detected'):
                     send_email_alert(
                         "Flow Balance Restored",
@@ -2486,6 +2499,7 @@ def main():
     # Alert types no longer raised by this code but still present in old state files
     for retired in ('load_shed_active',):
         alert_manager.forget(retired)
+    sync_alert_flags()
 
     # Start hardware watchdog (#8)
     watchdog = None
