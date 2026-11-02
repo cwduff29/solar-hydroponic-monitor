@@ -124,6 +124,11 @@ DS18B20_SENSOR_MAP = get_config('waterflow.temperature.sensor_map', {})
 
 # BME280 I2C Configuration
 BME280_I2C_ADDRESS = get_config('waterflow.bme280.i2c_address', 0x76)
+BME280_I2C_DEVICE = '/dev/i2c-1'
+# At boot udev hands /dev/i2c-1 to the i2c group a few seconds after this
+# service can start; the startup self-test (after GPIO setup, before the main
+# loop) waits up to this long.
+BME280_PERMISSION_WAIT_SECONDS = get_config('waterflow.bme280.permission_wait_seconds', 30)
 
 # ============================================================================
 # THRESHOLD LOADING (reloaded on SIGHUP)
@@ -476,6 +481,16 @@ def read_pi_undervoltage():
             return 1 if int(f.read().strip()) else 0
     except (OSError, ValueError):
         return None
+
+def wait_for_device_access(path, timeout_s, poll_s=1.0):
+    """Wait until path is readable and writable; returns True if it is."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if os.access(path, os.R_OK | os.W_OK):
+            return True
+        if not os.path.exists(path) or time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
 
 # ============================================================================
 # CACHED BME280 CALIBRATION (#6)
@@ -2450,6 +2465,9 @@ def send_startup_notification():
             return ("FAIL", "no DS18B20 sensors found in /sys/bus/w1/devices/28-*")
 
         def check_bme280():
+            if not wait_for_device_access(BME280_I2C_DEVICE, BME280_PERMISSION_WAIT_SECONDS):
+                return ("WARN", f"no read/write access to {BME280_I2C_DEVICE} after "
+                                f"{BME280_PERMISSION_WAIT_SECONDS}s (is the user in the i2c group?)")
             try:
                 import smbus2 as _smbus2
                 import bme280 as _bme280
