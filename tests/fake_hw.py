@@ -55,6 +55,7 @@ def import_waterflow():
         'watchdog.enabled': False,
     }
     real_get = monitor_common.get_config
+    real_send = monitor_common.send_email
     monitor_common.get_config = lambda key, default=None: overrides.get(key, real_get(key, default))
     monitor_common.send_email = lambda *a, **k: True
     monitor_common.startup_selftest = lambda *a, **k: None
@@ -62,6 +63,9 @@ def import_waterflow():
     import logging
     logging.disable(logging.CRITICAL)
     import waterflow_enhanced_failsafe as w
+    # waterflow keeps its own reference to the fake; other tests get the real ones back
+    monitor_common.send_email = real_send
+    logging.disable(logging.NOTSET)
     w.send_email_alert = lambda *a, **k: True
     w.TEST_TMP = tmp
     return w

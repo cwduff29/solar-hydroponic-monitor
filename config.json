@@ -191,7 +191,11 @@
     "email_cooldown_minutes": 60,
     "email_reminder_hours": 12,
     "daily_summary_hour": 7,
-    "summary_interval_days": 7
+    "summary_interval_days": 7,
+    "smtp_timeout_seconds": 20,
+    "email_retry_interval_seconds": 60,
+    "email_retry_max_hours": 6,
+    "email_retry_max_queued": 20
   },
   "paths": {
     "renogy_prom": "/ramdisk/Renogy.prom",
