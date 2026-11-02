@@ -451,6 +451,32 @@ def _discover_and_cache_sensors():
         _ds18b20_sensor_cache = []
         _ds18b20_cache_valid = False
 
+# Pi 5V supply under-voltage alarm, read from the rpi_volt hwmon chip. Exported
+# here because node_exporter's hwmon collector is disabled (see install.sh).
+HWMON_BASE_DIR = '/sys/class/hwmon'
+_rpi_volt_alarm_path = None   # None = not looked up yet, '' = not present
+
+def read_pi_undervoltage():
+    """1 if the Pi's 5V supply is under-voltage now, 0 if not, None if unavailable."""
+    global _rpi_volt_alarm_path
+    if _rpi_volt_alarm_path is None:
+        _rpi_volt_alarm_path = ''
+        for d in sorted(glob.glob(os.path.join(HWMON_BASE_DIR, 'hwmon*'))):
+            try:
+                with open(os.path.join(d, 'name')) as f:
+                    if f.read().strip() == 'rpi_volt':
+                        _rpi_volt_alarm_path = os.path.join(d, 'in0_lcrit_alarm')
+                        break
+            except OSError:
+                continue
+    if not _rpi_volt_alarm_path:
+        return None
+    try:
+        with open(_rpi_volt_alarm_path) as f:
+            return 1 if int(f.read().strip()) else 0
+    except (OSError, ValueError):
+        return None
+
 # ============================================================================
 # CACHED BME280 CALIBRATION (#6)
 # ============================================================================
@@ -2203,6 +2229,12 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# HELP waterflow_fan_disabled Fan disabled\n")
             f.write("# TYPE waterflow_fan_disabled gauge\n")
             f.write(f"waterflow_fan_disabled{{source=\"waterflow\"}} {1 if DISABLE_FAN else 0}\n")
+
+            undervoltage = read_pi_undervoltage()
+            if undervoltage is not None:
+                f.write("# HELP pi_undervoltage_alarm Pi 5V supply under-voltage right now (rpi_volt in0_lcrit_alarm)\n")
+                f.write("# TYPE pi_undervoltage_alarm gauge\n")
+                f.write(f"pi_undervoltage_alarm{{source=\"waterflow\"}} {undervoltage}\n")
 
             # Aeration
             f.write("# HELP aeration_state Aeration pump state\n")
