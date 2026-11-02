@@ -3666,7 +3666,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "node_hwmon_temp_celsius{chip=~\"cpu_thermal|thermal_thermal_zone0\",sensor=~\"temp0|temp1\"}",
+          "expr": "node_thermal_zone_temp{type=\"cpu-thermal\"}",
           "refId": "A"
         }
       ],
@@ -4471,7 +4471,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "node_hwmon_temp_celsius{chip=~\"cpu_thermal|thermal_thermal_zone0\",sensor=~\"temp0|temp1\"}",
+          "expr": "node_thermal_zone_temp{type=\"cpu-thermal\"}",
           "legendFormat": "CPU Temperature",
           "refId": "A"
         },

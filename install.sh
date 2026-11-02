@@ -99,7 +99,11 @@ echo "      Done."
 echo "[2/13] Installing Prometheus node_exporter..."
 apt-get install -y prometheus-node-exporter
 
-# Override service to add textfile collector pointing at /ramdisk
+# Override service to add textfile collector pointing at /ramdisk.
+# Off to keep the Pi Zero's scrape cheap: systemd and processes (CPU), and
+# hwmon, which reads every DS18B20 on the 1-wire bus (~2 s each, contending
+# with waterflow's reads). CPU temperature comes from the thermal_zone
+# collector; waterflow exports the 5V under-voltage alarm itself.
 NEXPORTER_OVERRIDE="/etc/systemd/system/prometheus-node-exporter.service.d"
 mkdir -p "$NEXPORTER_OVERRIDE"
 cat > "$NEXPORTER_OVERRIDE/textfile.conf" << 'EOF'
@@ -107,8 +111,9 @@ cat > "$NEXPORTER_OVERRIDE/textfile.conf" << 'EOF'
 ExecStart=
 ExecStart=/usr/bin/prometheus-node-exporter \
   --collector.textfile.directory=/ramdisk \
-  --collector.systemd \
-  --collector.processes
+  --no-collector.systemd \
+  --no-collector.processes \
+  --no-collector.hwmon
 EOF
 systemctl daemon-reload
 systemctl enable prometheus-node-exporter
