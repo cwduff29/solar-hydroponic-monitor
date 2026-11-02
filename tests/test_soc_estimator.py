@@ -172,6 +172,22 @@ class TestPersistenceAndBridging(unittest.TestCase):
         state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
         self.assertFalse(est.restore(state, 8 * 86400, (1100, 1000)))
 
+    def test_bridge_survives_clock_behind_saved_state(self):
+        # Power loss with no RTC: fake-hwclock restores a time before the last save
+        est = SocEstimator(CAP)
+        state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 10_000, 'counters': [1000, 900]}
+        self.assertTrue(est.restore(state, 10_000 - 3600, (1002, 905)))
+        self.assertAlmostEqual(est.soc_ah, 25.0 + 2 * 0.99 - 5, places=6)
+        events = est.pop_events()
+        self.assertIn('behind the saved state', events[0])
+        self.assertIn('bridged restart gap 0.0h', events[1])
+
+    def test_bridge_failure_reason_is_logged(self):
+        est = SocEstimator(CAP)
+        state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
+        self.assertFalse(est.restore(state, 3600, None))
+        self.assertIn('counters missing', est.pop_events()[0])
+
     def test_missing_or_corrupt_state(self):
         self.assertIsNone(soc_estimator.load_state('/nonexistent/x.json'))
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:

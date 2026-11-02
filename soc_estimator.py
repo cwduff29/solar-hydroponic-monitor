@@ -171,12 +171,25 @@ class SocEstimator:
             return False
         c0 = state.get('counters')
         gap_s = wall_t - state['wall_t']
-        if (not c0 or not counters or counters[0] < c0[0] or counters[1] < c0[1]
-                or gap_s < 0 or gap_s > self.cfg['max_bridge_days'] * 86400):
-            self._event('bridge failed (counters missing/reset or gap too long); reseeding')
+        why = None
+        if not c0 or not counters:
+            why = 'controller counters missing'
+        elif counters[0] < c0[0] or counters[1] < c0[1]:
+            why = 'controller counters reset'
+        elif gap_s > self.cfg['max_bridge_days'] * 86400:
+            why = f'gap {gap_s / 86400:.1f} days too long'
+        if why:
+            self._event(f'bridge failed ({why}); reseeding')
             return False
         self.soc_ah = float(state['soc_ah'])
         self.err_ah = float(state.get('err_ah') or 0.0)
+        if gap_s < 0:
+            # No RTC: after a power loss the clock restarts from fake-hwclock and
+            # can be behind the saved timestamp until NTP syncs. The counters are
+            # still exact, so bridge with them and treat the duration as unknown.
+            self._event(f'clock is {-gap_s:.0f}s behind the saved state (no RTC/NTP yet); '
+                        f'bridging with counters only')
+            gap_s = 0.0
         self._bridge(c0, counters, gap_s / 3600.0, 'restart')
         return True
 
