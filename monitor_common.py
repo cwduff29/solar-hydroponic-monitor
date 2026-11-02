@@ -95,25 +95,24 @@ def send_email(subject, body, disabled=False):
         SMTP_SERVER      Default: smtp.gmail.com
         SMTP_PORT        Default: 587
 
+    A transient failure (DNS, network down, timeout, SMTP 4xx) queues the
+    message for background retry (alerts.email_retry_*) and counts as sent,
+    so callers don't also retry it; startup and recovery emails used to be
+    lost when the network wasn't up yet after a boot.
+
     Args:
         subject:  Email subject line
         body:     Email body text
         disabled: If True, suppress sending and log instead
 
     Returns:
-        True on success, False on failure
+        True if sent or queued for retry, False on failure
     """
     if disabled:
         logging.info(f"[EMAILS DISABLED] Email suppressed: '{subject}'")
         return False
 
-    smtp_server     = os.environ.get('SMTP_SERVER',     'smtp.gmail.com')
-    smtp_port       = int(os.environ.get('SMTP_PORT',   '587'))
-    smtp_user       = os.environ.get('SMTP_USER',       '')
-    smtp_password   = os.environ.get('SMTP_PASSWORD',   '')
-    smtp_recipients = os.environ.get('SMTP_RECIPIENTS', '')
-
-    if not smtp_user or not smtp_password:
+    if not os.environ.get('SMTP_USER') or not os.environ.get('SMTP_PASSWORD'):
         logging.error(
             "Email credentials missing — set SMTP_USER and SMTP_PASSWORD "
             "in /etc/solar-hydroponic/credentials.env"
@@ -121,19 +120,102 @@ def send_email(subject, body, disabled=False):
         return False
 
     try:
-        msg = EmailMessage()
-        msg['From']    = smtp_user
-        msg['To']      = smtp_recipients
-        msg['Subject'] = subject
-        msg.set_content(body)
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
+        _deliver_email(subject, body)
         return True
     except Exception as e:
+        if _is_transient_email_error(e):
+            logging.warning(f"Email '{subject}' not sent ({e}); queued for retry")
+            _queue_email(subject, body, e)
+            return True
         logging.error(f"Failed to send email '{subject}': {e}")
         return False
+
+
+def _deliver_email(subject, body):
+    """Send one message; raises on failure."""
+    smtp_user = os.environ.get('SMTP_USER', '')
+    msg = EmailMessage()
+    msg['From']    = smtp_user
+    msg['To']      = os.environ.get('SMTP_RECIPIENTS', '')
+    msg['Subject'] = subject
+    msg.set_content(body)
+    with smtplib.SMTP(os.environ.get('SMTP_SERVER', 'smtp.gmail.com'),
+                      int(os.environ.get('SMTP_PORT', '587')),
+                      timeout=get_config('alerts.smtp_timeout_seconds', 20)) as server:
+        server.starttls()
+        server.login(smtp_user, os.environ.get('SMTP_PASSWORD', ''))
+        server.send_message(msg)
+
+
+def _is_transient_email_error(e):
+    """Network/DNS/timeout errors and SMTP 4xx replies are worth retrying."""
+    if isinstance(e, smtplib.SMTPResponseException):
+        return 400 <= e.smtp_code < 500
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        return False
+    return isinstance(e, OSError)   # socket.gaierror, TimeoutError, ConnectionError, ...
+
+
+_email_queue = []
+_email_queue_lock = threading.Lock()
+_email_retry_thread = None
+
+
+def _queue_email(subject, body, error):
+    global _email_retry_thread
+    max_queued = get_config('alerts.email_retry_max_queued', 20)
+    with _email_queue_lock:
+        while len(_email_queue) >= max_queued:
+            dropped = _email_queue.pop(0)
+            logging.error(f"Email retry queue full; dropped '{dropped['subject']}'")
+        _email_queue.append({
+            'subject': subject,
+            'body': body,
+            'queued': time.monotonic(),
+            'first_attempt': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error': str(error),
+        })
+        if _email_retry_thread is None:
+            _email_retry_thread = threading.Thread(
+                target=_email_retry_loop, name='email-retry', daemon=True)
+            _email_retry_thread.start()
+
+
+def _email_retry_loop():
+    """Retry queued emails in order until the queue is empty."""
+    global _email_retry_thread
+    while True:
+        time.sleep(get_config('alerts.email_retry_interval_seconds', 60))
+        max_age = get_config('alerts.email_retry_max_hours', 6) * 3600
+        with _email_queue_lock:
+            pending = list(_email_queue)
+        for item in pending:
+            age = time.monotonic() - item['queued']
+            delivered = drop = False
+            if age > max_age:
+                logging.error(f"Giving up on email '{item['subject']}' after {age / 3600:.1f}h")
+                drop = True
+            else:
+                try:
+                    _deliver_email(item['subject'], item['body'] + (
+                        f"\n\n[Delayed delivery: first attempt at {item['first_attempt']} "
+                        f"failed: {item['error']}]"))
+                    delivered = True
+                except Exception as e:
+                    if not _is_transient_email_error(e):
+                        logging.error(f"Failed to send queued email '{item['subject']}': {e}")
+                        drop = True
+            if delivered or drop:
+                with _email_queue_lock:
+                    _email_queue.remove(item)
+                if delivered:
+                    logging.warning(f"Queued email '{item['subject']}' sent after {age:.0f}s")
+            else:
+                break   # still offline; keep order and wait for the next round
+        with _email_queue_lock:
+            if not _email_queue:
+                _email_retry_thread = None
+                return
 
 
 # ============================================================================
