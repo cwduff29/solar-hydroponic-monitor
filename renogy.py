@@ -488,7 +488,9 @@ def read_rover_metrics():
         if previous_over_discharge_count is not None and current_over_discharge_count is not None:
             if current_over_discharge_count > previous_over_discharge_count:
                 new_over_discharge_event = True
-        if current_over_discharge_count is not None:
+        if (current_over_discharge_count is not None
+                and current_over_discharge_count != previous_over_discharge_count):
+            # Write only on change: this runs every poll and the SD card wears
             previous_over_discharge_count = current_over_discharge_count
             _save_persisted_counters()
 
