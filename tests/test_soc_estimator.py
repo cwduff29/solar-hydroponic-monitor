@@ -162,10 +162,47 @@ class TestPersistenceAndBridging(unittest.TestCase):
         self.assertIn('bridged', est2.pop_events()[0])
 
     def test_bridge_refused_on_counter_reset(self):
+        # Counters that stay reset on every attempt: a real reset, so reseed
         est = SocEstimator(CAP)
         state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
-        self.assertFalse(est.restore(state, 3600, (5, 3)))
+        self.assertIsNone(est.restore(state, 3600, (5, 3)))
+        self.assertIsNone(est.restore(state, 3610, (5, 3)))
+        self.assertFalse(est.restore(state, 3620, (5, 3)))
         self.assertIsNone(est.soc_ah)
+        events = est.pop_events()
+        self.assertIn('restore deferred', events[0])
+        self.assertIn('saved 1000/900 Ah, read 5/3 Ah', events[0])
+        self.assertIn('3 readings', events[-1])
+
+    def test_one_bad_read_does_not_discard_the_estimate(self):
+        # 2026-11-01 21:58: the first poll after a controller settings write
+        # looked like a counter reset; the next poll was normal again
+        est = SocEstimator(CAP)
+        state = {'soc_ah': 12.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [8064, 7551]}
+        self.assertIsNone(est.restore(state, 60, (0, 0)))
+        self.assertIsNone(est.soc_ah)
+        self.assertTrue(est.restore(state, 70, (8064, 7551)))
+        self.assertAlmostEqual(est.soc_ah, 12.0, places=6)
+        events = est.pop_events()
+        self.assertIn('restore deferred', events[0])
+        self.assertIn('bridged restart', events[-1])
+
+    def test_missing_counters_retry_then_restore(self):
+        est = SocEstimator(CAP)
+        state = {'soc_ah': 30.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
+        self.assertIsNone(est.restore(state, 10, None))
+        self.assertTrue(est.restore(state, 20, (1001, 902)))
+        self.assertAlmostEqual(est.soc_ah, 30.0 + 0.99 - 2, places=6)
+
+    def test_restore_attempts_configurable(self):
+        est = SocEstimator(CAP, config={'restore_attempts': 1})
+        state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
+        self.assertFalse(est.restore(state, 3600, (5, 3)))
+
+    def test_long_gap_fails_immediately(self):
+        est = SocEstimator(CAP)
+        state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
+        self.assertFalse(est.restore(state, 8 * 86400, (1100, 1000)))
 
     def test_bridge_refused_after_max_days(self):
         est = SocEstimator(CAP)
@@ -185,7 +222,7 @@ class TestPersistenceAndBridging(unittest.TestCase):
     def test_bridge_failure_reason_is_logged(self):
         est = SocEstimator(CAP)
         state = {'soc_ah': 25.0, 'err_ah': 1.0, 'wall_t': 0, 'counters': [1000, 900]}
-        self.assertFalse(est.restore(state, 3600, None))
+        self.assertIsNone(est.restore(state, 3600, None))
         self.assertIn('counters missing', est.pop_events()[0])
 
     def test_missing_or_corrupt_state(self):
