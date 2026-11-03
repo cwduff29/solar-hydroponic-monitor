@@ -25,6 +25,7 @@ Features:
 - Cached DS18B20 sensor paths
 - Cached BME280 calibration parameters
 - Skip pump tests on low battery SOC
+- Brushless PWM main pump control via MOSFET switch module
 """
 
 import RPi.GPIO as GPIO
@@ -88,6 +89,14 @@ BACKUP_PUMP_RELAY_GPIO  = get_config('waterflow.gpio.backup_pump_relay',  23)
 AERATION_PUMP_GPIO      = get_config('waterflow.gpio.aeration_pump',      24)
 FAN_CONTROL_GPIO        = get_config('waterflow.gpio.fan_control',        25)
 
+# Brushless PWM Configuration for main pump (MOSFET switch module)
+# Single PWM GPIO drives the MOSFET gate; the motor handles its own commutation.
+MAIN_PUMP_PWM_ENABLED  = get_config('waterflow.main_pump_brushless_pwm.enabled',              False)
+MAIN_PUMP_PWM_GPIO     = get_config('waterflow.main_pump_brushless_pwm.pwm_gpio',             12)
+MAIN_PUMP_PWM_FREQ     = get_config('waterflow.main_pump_brushless_pwm.frequency_hz',         1000)
+MAIN_PUMP_DEFAULT_DUTY = get_config('waterflow.main_pump_brushless_pwm.default_duty_cycle_pct', 100)
+MAIN_PUMP_MIN_DUTY     = get_config('waterflow.main_pump_brushless_pwm.min_duty_cycle_pct',   0)
+
 # Flow Sensor Configuration
 FLOW_CALIBRATION_FACTOR  = get_config('waterflow.flow.calibration_factor',           7.5)
 FLOW_MEASUREMENT_DURATION = get_config('waterflow.flow.measurement_duration_seconds', 10)
@@ -139,7 +148,8 @@ def _load_thresholds():
     global AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
     global PUMP_TEST_INTERVAL, PUMP_TEST_DURATION
     global PUMP_CYCLE_PAUSE, PUMP_RECOVERY_WAIT, PUMP_CYCLE_MAX_ATTEMPTS
-    global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT
+    global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT, BATTERY_DATA_BOOT_GRACE
+    global MAIN_PUMP_TARGET_FLOW, MAIN_PUMP_FLOW_KP, MAIN_PUMP_FLOW_DEADBAND, MAIN_PUMP_FLOW_MAX_STEP
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
     global MAX_TEMP_C, MIN_TEMP_C
     global MAX_HUMIDITY_PCT, MIN_HUMIDITY_PCT
@@ -205,6 +215,7 @@ def _load_thresholds():
     # Battery data
     BATTERY_DATA_FILE    = get_config('paths.battery_data_file',         '/ramdisk/Renogy.prom')
     BATTERY_DATA_TIMEOUT = get_config('paths.battery_data_timeout_seconds', 60)
+    BATTERY_DATA_BOOT_GRACE = get_config('paths.battery_data_boot_grace_seconds', 180)
 
     # Alert timing
     EMAIL_COOLDOWN_MINUTES = get_config('alerts.email_cooldown_minutes', 60)
@@ -221,6 +232,12 @@ def _load_thresholds():
     MAX_SPIKE_MULTIPLIER = get_config('waterflow.thresholds.max_spike_multiplier',  5.0)
 
     FLOW_IMBALANCE_PCT   = get_config('waterflow.flow.imbalance_threshold_pct',     30)
+
+    # Closed-loop flow rate control (0 = disabled)
+    MAIN_PUMP_TARGET_FLOW    = get_config('waterflow.main_pump_brushless_pwm.target_flow_lpm',    0.0)
+    MAIN_PUMP_FLOW_KP        = get_config('waterflow.main_pump_brushless_pwm.flow_control_kp',    5.0)
+    MAIN_PUMP_FLOW_DEADBAND  = get_config('waterflow.main_pump_brushless_pwm.flow_deadband_lpm',  0.1)
+    MAIN_PUMP_FLOW_MAX_STEP  = get_config('waterflow.main_pump_brushless_pwm.flow_max_step_pct',  2.0)
 
 _load_thresholds()
 
@@ -281,10 +298,31 @@ def get_relay_state(device_on, terminal_type):
         return GPIO.HIGH if relay_energized else GPIO.LOW
 
 
-def set_main_pump(state):
-    """Set main pump ON or OFF"""
-    gpio_state = get_relay_state(state, MAIN_PUMP_TERMINAL)
-    GPIO.output(MAIN_PUMP_RELAY_GPIO, gpio_state)
+def set_main_pump(state, duty_cycle=None):
+    """Set main pump ON or OFF, with optional PWM duty cycle (0-100) in brushless PWM mode."""
+    global main_pump_duty_cycle
+    if MAIN_PUMP_PWM_ENABLED and _main_pump_pwm is not None:
+        if state:
+            dc = duty_cycle if duty_cycle is not None else MAIN_PUMP_DEFAULT_DUTY
+            dc = max(float(MAIN_PUMP_MIN_DUTY), min(100.0, float(dc)))
+            main_pump_duty_cycle = dc
+            _main_pump_pwm.ChangeDutyCycle(dc)
+        else:
+            main_pump_duty_cycle = 0.0
+            _main_pump_pwm.ChangeDutyCycle(0)
+    else:
+        main_pump_duty_cycle = 100.0 if state else 0.0
+        gpio_state = get_relay_state(state, MAIN_PUMP_TERMINAL)
+        GPIO.output(MAIN_PUMP_RELAY_GPIO, gpio_state)
+
+
+def set_main_pump_speed(duty_cycle_pct):
+    """Adjust main pump speed while running (PWM mode only). No-op in relay mode."""
+    if MAIN_PUMP_PWM_ENABLED and _main_pump_pwm is not None:
+        if main_pump_duty_cycle > 0:
+            set_main_pump(True, duty_cycle=duty_cycle_pct)
+    else:
+        logging.warning("set_main_pump_speed called but brushless PWM mode is not enabled")
 
 
 def set_backup_pump(state):
@@ -308,6 +346,10 @@ def set_fan(state):
 # ============================================================================
 # GLOBAL STATE
 # ============================================================================
+
+# Brushless PWM object for main pump speed control
+_main_pump_pwm = None
+main_pump_duty_cycle = 0.0  # current duty cycle (0-100); 0 = off
 
 # Flow counter lock (#1 - race condition fix)
 _flow_lock = threading.Lock()
@@ -444,13 +486,24 @@ def clear_alert(alert_type):
 
 def setup_gpio():
     """Initialize GPIO pins"""
+    global _main_pump_pwm
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
     GPIO.setup(FLOW_SENSOR_INLET_GPIO,  GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(FLOW_SENSOR_OUTLET_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    GPIO.setup(MAIN_PUMP_RELAY_GPIO,   GPIO.OUT)
+    if MAIN_PUMP_PWM_ENABLED:
+        GPIO.setup(MAIN_PUMP_PWM_GPIO, GPIO.OUT)
+        _main_pump_pwm = GPIO.PWM(MAIN_PUMP_PWM_GPIO, MAIN_PUMP_PWM_FREQ)
+        _main_pump_pwm.start(0)
+        logging.info(
+            f"Brushless PWM initialized: GPIO{MAIN_PUMP_PWM_GPIO}, "
+            f"Freq={MAIN_PUMP_PWM_FREQ}Hz"
+        )
+    else:
+        GPIO.setup(MAIN_PUMP_RELAY_GPIO, GPIO.OUT)
+
     GPIO.setup(BACKUP_PUMP_RELAY_GPIO, GPIO.OUT)
     GPIO.setup(AERATION_PUMP_GPIO,     GPIO.OUT)
     GPIO.setup(FAN_CONTROL_GPIO,       GPIO.OUT)
@@ -460,12 +513,18 @@ def setup_gpio():
     set_aeration(False)
     set_fan(False)
 
-    logging.info(
-        f"GPIO initialized - Relay config: "
-        f"Main={MAIN_PUMP_TERMINAL}, Backup={BACKUP_PUMP_TERMINAL}, "
-        f"Aeration={AERATION_TERMINAL}, Fan={FAN_TERMINAL}, "
-        f"Board={'ACTIVE_LOW' if RELAY_BOARD_ACTIVE_LOW else 'ACTIVE_HIGH'}"
-    )
+    if MAIN_PUMP_PWM_ENABLED:
+        logging.info(
+            f"GPIO initialized - Main pump: brushless PWM (GPIO{MAIN_PUMP_PWM_GPIO}), "
+            f"Backup/Aeration/Fan: relay"
+        )
+    else:
+        logging.info(
+            f"GPIO initialized - Relay config: "
+            f"Main={MAIN_PUMP_TERMINAL}, Backup={BACKUP_PUMP_TERMINAL}, "
+            f"Aeration={AERATION_TERMINAL}, Fan={FAN_TERMINAL}, "
+            f"Board={'ACTIVE_LOW' if RELAY_BOARD_ACTIVE_LOW else 'ACTIVE_HIGH'}"
+        )
 
     for pin in (FLOW_SENSOR_INLET_GPIO, FLOW_SENSOR_OUTLET_GPIO):
         try:
@@ -585,11 +644,15 @@ def validate_flow_reading(flow_inlet, flow_outlet):
     # If smoothed drops near zero (e.g. after aerator suppression or a restart), all real readings
     # would be rejected as spikes, permanently locking out updates. Only apply when baseline is
     # large enough that a valid reading at MIN_FLOW_THRESHOLD wouldn't be falsely flagged.
+    # Also skip while backup_pump_active: the backup pump may have significantly different flow
+    # characteristics than the main pump, so the main pump's smoothed baseline is not a valid
+    # reference and would cause genuine backup pump readings to be rejected as spikes.
     spike_min_baseline = MIN_FLOW_THRESHOLD / MAX_SPIKE_MULTIPLIER
-    if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
-        issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
-    if smoothed_flow_outlet > spike_min_baseline and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
-        issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
+    if not backup_pump_active:
+        if smoothed_flow_inlet > spike_min_baseline and flow_inlet > smoothed_flow_inlet * MAX_SPIKE_MULTIPLIER:
+            issues.append(f"Inlet flow spike: {flow_inlet:.3f} vs smoothed {smoothed_flow_inlet:.3f} L/min")
+        if smoothed_flow_outlet > spike_min_baseline and flow_outlet > smoothed_flow_outlet * MAX_SPIKE_MULTIPLIER:
+            issues.append(f"Outlet flow spike: {flow_outlet:.3f} vs smoothed {smoothed_flow_outlet:.3f} L/min")
     return (len(issues) == 0, issues)
 
 
@@ -765,6 +828,23 @@ def monitor_flow():
         smoothed_flow_inlet  = sum(f * w for f, w in zip(flow_history_inlet,  weights)) / sum(weights)
         smoothed_flow_outlet = sum(f * w for f, w in zip(flow_history_outlet, weights)) / sum(weights)
 
+        # Closed-loop duty cycle control targeting MAIN_PUMP_TARGET_FLOW L/min
+        if (MAIN_PUMP_PWM_ENABLED and MAIN_PUMP_TARGET_FLOW > 0
+                and not backup_pump_active and main_pump_duty_cycle > 0):
+            error = MAIN_PUMP_TARGET_FLOW - smoothed_flow_inlet
+            if abs(error) > MAIN_PUMP_FLOW_DEADBAND:
+                step = max(-MAIN_PUMP_FLOW_MAX_STEP,
+                           min(MAIN_PUMP_FLOW_MAX_STEP, MAIN_PUMP_FLOW_KP * error))
+                new_duty = max(float(MAIN_PUMP_MIN_DUTY),
+                               min(100.0, main_pump_duty_cycle + step))
+                if abs(new_duty - main_pump_duty_cycle) >= 0.5:
+                    logging.debug(
+                        f"Flow control: {smoothed_flow_inlet:.3f} L/min "
+                        f"(target {MAIN_PUMP_TARGET_FLOW:.1f}), "
+                        f"duty {main_pump_duty_cycle:.1f}% -> {new_duty:.1f}%"
+                    )
+                    set_main_pump_speed(new_duty)
+
         # Skip flow alert logic if disabled
         if DISABLE_FLOW_ALERTS:
             logging.debug(
@@ -864,6 +944,14 @@ def monitor_flow():
                 logging.warning(
                     "pump_recovery_failed cleared: flow restored to healthy "
                     f"({smoothed_flow_inlet:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min)"
+                )
+            # Clear stale backup_pump_failover alert when main pump is running with good flow.
+            # This handles the case where the system rebooted and main pump recovered but the
+            # alert persisted in storage from a previous failover event.
+            if not backup_pump_active and alert_manager.clear('backup_pump_failover'):
+                logging.warning(
+                    "backup_pump_failover cleared: main pump running with healthy flow "
+                    f"({smoothed_flow_inlet:.3f} L/min)"
                 )
 
         # Flow imbalance (leak detection)
@@ -1103,6 +1191,13 @@ def read_enclosure_conditions():
 # BATTERY DATA
 # ============================================================================
 
+def _system_uptime_seconds():
+    try:
+        with open('/proc/uptime', 'r') as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return float('inf')
+
 def _alert_battery_data_unavailable(reason):
     """Send a one-time alert when battery SOC data is unavailable."""
     alert_type = 'battery_data_unavailable'
@@ -1128,6 +1223,11 @@ def read_battery_soc():
     global battery_soc, renogy_monitor_healthy, renogy_controller_temp_c
 
     try:
+        uptime = _system_uptime_seconds()
+        if uptime < BATTERY_DATA_BOOT_GRACE:
+            logging.debug(f"Boot grace period active ({uptime:.0f}s uptime), skipping battery data check")
+            return None
+
         if not os.path.exists(BATTERY_DATA_FILE):
             _alert_battery_data_unavailable("battery data file not found (is renogy.py running?)")
             return None
@@ -1664,6 +1764,20 @@ def test_backup_pump():
 # PUMP RECOVERY
 # ============================================================================
 
+def _take_fresh_flow_reading():
+    """
+    Take a fresh flow measurement while the main loop is blocked (e.g. during
+    pump recovery sleeps).  smoothed_flow_inlet is only updated by monitor_flow()
+    which cannot run while attempt_pump_recovery() holds the thread, so we do
+    a one-shot measurement here instead of reading the stale smoothed value.
+    """
+    start_flow_measurement()
+    time.sleep(FLOW_MEASUREMENT_DURATION + 1)
+    with _flow_lock:
+        snapshot = count_inlet
+    return snapshot / (FLOW_CALIBRATION_FACTOR * FLOW_MEASUREMENT_DURATION)
+
+
 def attempt_pump_recovery():
     """
     Attempt to restore flow after sustained low flow is detected.
@@ -1687,17 +1801,18 @@ def attempt_pump_recovery():
         set_main_pump(True)
 
         time.sleep(PUMP_RECOVERY_WAIT)
+        fresh_flow = _take_fresh_flow_reading()
 
-        if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD:
+        if fresh_flow >= MIN_FLOW_THRESHOLD:
             logging.warning(
                 f"Pump recovery: flow restored after cycle {attempt} "
-                f"({smoothed_flow_inlet:.3f} L/min)"
+                f"({fresh_flow:.3f} L/min)"
             )
             send_email_alert(
                 "Water Flow Restored - Main Pump Cycled",
                 f"Low flow was resolved by cycling the main pump.\n\n"
                 f"Cycles attempted: {attempt}\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
@@ -1713,10 +1828,11 @@ def attempt_pump_recovery():
     recovery_attempted = False  # Allow one recovery attempt on the backup pump
 
     time.sleep(PUMP_RECOVERY_WAIT)
+    fresh_flow = _take_fresh_flow_reading()
 
-    if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD:
+    if fresh_flow >= MIN_FLOW_THRESHOLD:
         logging.warning(
-            f"Pump recovery: backup pump restored flow ({smoothed_flow_inlet:.3f} L/min)"
+            f"Pump recovery: backup pump restored flow ({fresh_flow:.3f} L/min)"
         )
         alert_type = 'backup_pump_failover'
         should_send, reason = alert_manager.should_send(alert_type)
@@ -1725,7 +1841,7 @@ def attempt_pump_recovery():
                 "Warning: Running on Backup Pump - Main Pump Failed",
                 f"Main pump failed to restore flow after {PUMP_CYCLE_MAX_ATTEMPTS} cycles.\n"
                 f"System has switched to the backup pump.\n\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"Action required: inspect main pump and filters.\n"
@@ -1734,7 +1850,7 @@ def attempt_pump_recovery():
             alert_manager.mark_sent(alert_type)
     else:
         logging.error(
-            f"Pump recovery: backup pump also failed ({smoothed_flow_inlet:.3f} L/min) "
+            f"Pump recovery: backup pump also failed ({fresh_flow:.3f} L/min) "
             f"- manual intervention required"
         )
         alert_type = 'pump_recovery_failed'
@@ -1743,7 +1859,7 @@ def attempt_pump_recovery():
             send_email_alert(
                 "CRITICAL: Both Pumps Failed - Manual Intervention Required",
                 f"Automatic recovery failed. Neither main nor backup pump restored flow.\n\n"
-                f"Current flow: {smoothed_flow_inlet:.3f} L/min\n"
+                f"Current flow: {fresh_flow:.3f} L/min\n"
                 f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
                 f"Main pump cycles attempted: {PUMP_CYCLE_MAX_ATTEMPTS}\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -1874,9 +1990,25 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# TYPE waterflow_backup_pump_active gauge\n")
             f.write(f"waterflow_backup_pump_active{{source=\"waterflow\"}} {1 if backup_pump_active else 0}\n")
 
+            if MAIN_PUMP_PWM_ENABLED:
+                f.write("# HELP waterflow_main_pump_duty_cycle Main pump PWM duty cycle (0-100)\n")
+                f.write("# TYPE waterflow_main_pump_duty_cycle gauge\n")
+                f.write(f"waterflow_main_pump_duty_cycle{{source=\"waterflow\"}} {main_pump_duty_cycle:.1f}\n")
+                f.write("# HELP waterflow_target_flow_lpm Target flow rate for closed-loop control (0=disabled)\n")
+                f.write("# TYPE waterflow_target_flow_lpm gauge\n")
+                f.write(f"waterflow_target_flow_lpm{{source=\"waterflow\"}} {MAIN_PUMP_TARGET_FLOW:.2f}\n")
+
             f.write("# HELP waterflow_pump_recovery_attempted Recovery attempted for current low flow event\n")
             f.write("# TYPE waterflow_pump_recovery_attempted gauge\n")
             f.write(f"waterflow_pump_recovery_attempted{{source=\"waterflow\"}} {1 if recovery_attempted else 0}\n")
+
+            f.write("# HELP waterflow_pump_recovery_failed Both pumps failed to restore flow, manual intervention required\n")
+            f.write("# TYPE waterflow_pump_recovery_failed gauge\n")
+            f.write(f"waterflow_pump_recovery_failed{{source=\"waterflow\"}} {1 if alert_manager.is_active('pump_recovery_failed') else 0}\n")
+
+            f.write("# HELP waterflow_backup_pump_failover Main pump failed, system running on backup pump\n")
+            f.write("# TYPE waterflow_backup_pump_failover gauge\n")
+            f.write(f"waterflow_backup_pump_failover{{source=\"waterflow\"}} {1 if alert_manager.is_active('backup_pump_failover') else 0}\n")
 
             f.write("# HELP waterflow_leak_detected Leak detection active\n")
             f.write("# TYPE waterflow_leak_detected gauge\n")
