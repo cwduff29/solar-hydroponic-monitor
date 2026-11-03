@@ -69,6 +69,7 @@ DEFAULTS = {
     'hw_tolerance_pct': 5.0,
     'max_integration_gap_seconds': 900,
     'max_bridge_days': 7,
+    'restore_attempts': 3,           # readings to try before treating counters as reset
 }
 
 
@@ -110,6 +111,7 @@ class SocEstimator:
         self.external_charge_suspected = False
         self.last_event = 'init'
         self._events = []
+        self._restore_tries = 0
         self._full_since = None
         self._rest_full_since = None
         self._low_since = None
@@ -165,21 +167,35 @@ class SocEstimator:
         """
         Resume from a saved state, adding the charge that moved while this
         process was not running (from the controller's cumulative counters).
-        Returns True if restored; False leaves the estimator unseeded.
+
+        Returns True if restored; False leaves the estimator unseeded (it
+        seeds on the next update). Returns None when the counters are missing
+        or look reset: one bad Modbus read must not discard the estimate, so
+        the caller should try again with the next reading. After
+        restore_attempts such readings it gives up and returns False.
         """
         if not state or state.get('soc_ah') is None or state.get('wall_t') is None:
             return False
         c0 = state.get('counters')
         gap_s = wall_t - state['wall_t']
-        why = None
+        counters_bad = None
         if not c0 or not counters:
-            why = 'controller counters missing'
+            counters_bad = 'controller counters missing'
         elif counters[0] < c0[0] or counters[1] < c0[1]:
-            why = 'controller counters reset'
-        elif gap_s > self.cfg['max_bridge_days'] * 86400:
-            why = f'gap {gap_s / 86400:.1f} days too long'
-        if why:
-            self._event(f'bridge failed ({why}); reseeding')
+            counters_bad = 'controller counters reset'
+        if counters_bad:
+            self._restore_tries += 1
+            attempts = max(1, int(self.cfg['restore_attempts']))
+            detail = (f'{counters_bad}: saved {_fmt_counters(c0)}, '
+                      f'read {_fmt_counters(counters)}')
+            if self._restore_tries < attempts:
+                self._event(f'restore deferred ({detail}); retry '
+                            f'{self._restore_tries}/{attempts - 1} on the next reading')
+                return None
+            self._event(f'bridge failed ({detail}, {self._restore_tries} readings); reseeding')
+            return False
+        if gap_s > self.cfg['max_bridge_days'] * 86400:
+            self._event(f'bridge failed (gap {gap_s / 86400:.1f} days too long); reseeding')
             return False
         self.soc_ah = float(state['soc_ah'])
         self.err_ah = float(state.get('err_ah') or 0.0)
@@ -324,6 +340,10 @@ class SocEstimator:
 # ----------------------------------------------------------------------
 # State file helpers
 # ----------------------------------------------------------------------
+
+def _fmt_counters(c):
+    return f'{c[0]:g}/{c[1]:g} Ah' if c else 'none'
+
 
 def load_state(path):
     try:

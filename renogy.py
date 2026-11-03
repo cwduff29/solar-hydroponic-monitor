@@ -217,7 +217,8 @@ SOC_PERSIST_INTERVAL = get_config('renogy.soc_estimator.persist_interval_seconds
 soc_est = soc_estimator.SocEstimator(
     BATTERY_CAPACITY_AH, BATTERY_CHEMISTRY, get_config('renogy.soc_estimator', {})
 )
-_soc_restore_attempted = False
+_soc_restore_pending = True     # until restore() succeeds or gives up
+_soc_saved_state = None
 _soc_last_persist = 0.0
 
 def initialize_rover():
@@ -437,7 +438,7 @@ def _persist_soc_estimate(force=False):
 
 def _update_soc_estimate(metrics, hw_soc):
     """Replace battery_soc with the estimator output and export its diagnostics."""
-    global _soc_restore_attempted
+    global _soc_restore_pending, _soc_saved_state
     batt_v = metrics.get("battery_voltage")
     if batt_v is None:
         metrics["battery_soc_source"] = 1
@@ -450,9 +451,18 @@ def _update_soc_estimate(metrics, hw_soc):
     if metrics.get("total_charging_ah") is not None and metrics.get("total_discharging_ah") is not None:
         counters = (metrics["total_charging_ah"], metrics["total_discharging_ah"])
 
-    if not _soc_restore_attempted:
-        _soc_restore_attempted = True
-        soc_est.restore(soc_estimator.load_state(SOC_STATE_FILE), time.time(), counters)
+    if _soc_restore_pending:
+        if _soc_saved_state is None:
+            _soc_saved_state = soc_estimator.load_state(SOC_STATE_FILE) or {}
+        restored = soc_est.restore(_soc_saved_state, time.time(), counters)
+        if restored is None:
+            # Counters looked wrong: keep the saved state (nothing is persisted
+            # while unseeded) and retry on the next poll; export the register.
+            for event in soc_est.pop_events():
+                logging.warning(f"SOC estimator: {event}")
+            metrics["battery_soc_source"] = 1
+            return
+        _soc_restore_pending = False
 
     soc = soc_est.update(
         time.monotonic(), batt_v, _charge_current(metrics), load_i,

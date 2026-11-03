@@ -19,7 +19,8 @@
       "rest_full_voltage": 13.4,
       "rest_full_hold_seconds": 1800,
       "low_clamp_soc_pct": 20.0,
-      "low_clamp_hold_seconds": 300
+      "low_clamp_hold_seconds": 300,
+      "restore_attempts": 3
     },
     "thresholds": {
       "low_battery_voltage": 12.8,
