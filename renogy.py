@@ -28,6 +28,7 @@ import signal
 import traceback
 from datetime import datetime, timedelta
 from renogy_extended import RenogyRoverExtended
+import soc_estimator
 
 # Load shared modules
 from monitor_common import (
@@ -40,6 +41,7 @@ from monitor_common import (
     reload_config,
     validate_config,
     startup_selftest,
+    SustainedLatch,
 )
 
 # ============================================================================
@@ -76,35 +78,6 @@ BATTERY_CAPACITY_AH = get_config('renogy.battery_capacity_ah', 50)
 BATTERY_NOMINAL_VOLTAGE = get_config('renogy.battery_nominal_voltage', 12.8)
 BATTERY_CHEMISTRY = get_config('renogy.battery_chemistry', 'lifepo4')
 
-# Voltage-to-SOC lookup tables (open-circuit voltage at ~0.1C load, 12 V 4S pack)
-_SOC_TABLES = {
-    'lifepo4': [
-        (13.60, 100), (13.40, 90), (13.30, 70), (13.20, 50),
-        (13.10, 30), (13.00, 20), (12.80, 10), (12.50,  5), (12.00,  0),
-    ],
-    'lead_acid': [
-        (12.70, 100), (12.50, 90), (12.42, 75), (12.32, 50),
-        (12.20, 25), (12.06, 10), (11.90,  0),
-    ],
-}
-
-def _voltage_to_soc(voltage, chemistry=None):
-    """Linearly interpolate SOC from battery voltage using the chemistry table."""
-    if chemistry is None:
-        chemistry = BATTERY_CHEMISTRY
-    table = _SOC_TABLES.get(chemistry, _SOC_TABLES['lifepo4'])
-    if voltage >= table[0][0]:
-        return table[0][1]
-    if voltage <= table[-1][0]:
-        return table[-1][1]
-    for i in range(len(table) - 1):
-        v_hi, soc_hi = table[i]
-        v_lo, soc_lo = table[i + 1]
-        if v_lo <= voltage <= v_hi:
-            t = (voltage - v_lo) / (v_hi - v_lo)
-            return soc_lo + t * (soc_hi - soc_lo)
-    return None
-
 # File paths (all in ramdisk to minimize SD writes)
 TEMP_FILE_PATH = get_config('paths.renogy_prom_tmp', '/ramdisk/Renogy.prom.tmp')
 FINAL_FILE_PATH = get_config('paths.renogy_prom', '/ramdisk/Renogy.prom')
@@ -121,8 +94,11 @@ def _load_thresholds():
     global MAX_REASONABLE_TEMPERATURE, MIN_REASONABLE_TEMPERATURE
     global MAX_REASONABLE_CURRENT, MAX_REASONABLE_POWER
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
+    global LOW_VOLTAGE_SUSTAINED_SECONDS, LOW_VOLTAGE_CLEAR_HYSTERESIS_V
 
     LOW_BATTERY_VOLTAGE_THRESHOLD         = get_config('renogy.thresholds.low_battery_voltage', 12.8)
+    LOW_VOLTAGE_SUSTAINED_SECONDS         = get_config('renogy.thresholds.low_battery_voltage_sustained_seconds', 600)
+    LOW_VOLTAGE_CLEAR_HYSTERESIS_V        = get_config('renogy.thresholds.low_battery_voltage_clear_hysteresis_v', 0.2)
     HIGH_CONTROLLER_TEMPERATURE_THRESHOLD = get_config('renogy.thresholds.high_controller_temp_c', 45.0)
     HIGH_BATTERY_TEMPERATURE_THRESHOLD    = get_config('renogy.thresholds.high_battery_temp_c', 50.0)
     LOW_BATTERY_TEMPERATURE_THRESHOLD     = get_config('renogy.thresholds.low_battery_temp_c', 0.0)
@@ -211,11 +187,19 @@ def _sighup_handler(signum, frame):
         # Update AlertManager cooldown/reminder from new config
         alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
         alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours', 12)
+        soc_est.configure(get_config('renogy.soc_estimator', {}))
         logging.warning("Config reloaded and thresholds updated")
     else:
         logging.error("Config reload failed")
 
 signal.signal(signal.SIGHUP, _sighup_handler)
+
+
+def _sigterm_handler(signum, frame):
+    # systemd stop: unwind through the main loop's finally (saves SOC state)
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 # ============================================================================
 # CONNECTION MANAGEMENT
@@ -224,9 +208,18 @@ signal.signal(signal.SIGHUP, _sighup_handler)
 rover = None
 last_successful_connection = None
 connection_failures = 0
-_using_voltage_soc = False   # hysteresis state for SOC source selection
-_cc_soc = None               # coulomb-counted SOC (%), None when not active
-_cc_last_time = None         # monotonic timestamp of last integration step
+
+# Battery SOC estimator (see soc_estimator.py). The hardware SOC register is
+# voltage-driven and unreliable on LiFePO4; it is exported as battery_soc_hw.
+SOC_ESTIMATOR_ENABLED = get_config('renogy.soc_estimator.enabled', True)
+SOC_STATE_FILE = get_config('renogy.soc_estimator.state_file', '/var/lib/renogy/soc_estimator.json')
+SOC_PERSIST_INTERVAL = get_config('renogy.soc_estimator.persist_interval_seconds', 300)
+soc_est = soc_estimator.SocEstimator(
+    BATTERY_CAPACITY_AH, BATTERY_CHEMISTRY, get_config('renogy.soc_estimator', {})
+)
+_soc_restore_pending = True     # until restore() succeeds or gives up
+_soc_saved_state = None
+_soc_last_persist = 0.0
 
 def initialize_rover():
     """Initialize Renogy Rover with retry logic"""
@@ -413,6 +406,82 @@ def _save_persisted_counters():
 
 _load_persisted_counters()
 
+def _charge_current(metrics):
+    """Current into the battery from the controller (A).
+
+    Default: solar input power x MPPT efficiency / battery voltage (validated
+    against the controller's Ah counters). "register" uses reg 0x0102 instead.
+    """
+    if get_config('renogy.soc_estimator.charge_current_source', 'solar_power') == 'register':
+        return metrics.get("battery_charging_current")
+    solar_w = metrics.get("solar_input_power")
+    batt_v = metrics.get("battery_voltage")
+    if solar_w is None or not batt_v:
+        return None
+    return solar_w * get_config('renogy.soc_estimator.mppt_efficiency', 0.967) / batt_v
+
+
+def _persist_soc_estimate(force=False):
+    """Save estimator state at most every SOC_PERSIST_INTERVAL seconds (SD wear)."""
+    global _soc_last_persist
+    if soc_est.soc_ah is None:
+        return
+    now = time.monotonic()
+    if not force and now - _soc_last_persist < SOC_PERSIST_INTERVAL:
+        return
+    try:
+        soc_estimator.save_state(SOC_STATE_FILE, soc_est.to_state(time.time()))
+        _soc_last_persist = now
+    except OSError as e:
+        logging.warning(f"Could not save SOC estimator state to {SOC_STATE_FILE}: {e}")
+
+
+def _update_soc_estimate(metrics, hw_soc):
+    """Replace battery_soc with the estimator output and export its diagnostics."""
+    global _soc_restore_pending, _soc_saved_state
+    batt_v = metrics.get("battery_voltage")
+    if batt_v is None:
+        metrics["battery_soc_source"] = 1
+        return
+
+    load_i = metrics.get("load_current")
+    if load_i is None and metrics.get("load_power") is not None:
+        load_i = metrics["load_power"] / batt_v
+    counters = None
+    if metrics.get("total_charging_ah") is not None and metrics.get("total_discharging_ah") is not None:
+        counters = (metrics["total_charging_ah"], metrics["total_discharging_ah"])
+
+    if _soc_restore_pending:
+        if _soc_saved_state is None:
+            _soc_saved_state = soc_estimator.load_state(SOC_STATE_FILE) or {}
+        restored = soc_est.restore(_soc_saved_state, time.time(), counters)
+        if restored is None:
+            # Counters looked wrong: keep the saved state (nothing is persisted
+            # while unseeded) and retry on the next poll; export the register.
+            for event in soc_est.pop_events():
+                logging.warning(f"SOC estimator: {event}")
+            metrics["battery_soc_source"] = 1
+            return
+        _soc_restore_pending = False
+
+    soc = soc_est.update(
+        time.monotonic(), batt_v, _charge_current(metrics), load_i,
+        charging_state=metrics.get("charging_state_code"), hw_soc=hw_soc, counters=counters,
+    )
+    for event in soc_est.pop_events():
+        logging.warning(f"SOC estimator: {event}")
+    _persist_soc_estimate()
+
+    metrics["battery_soc"] = round(soc, 1)
+    metrics["battery_capacity_ah_remaining"] = round(soc_est.remaining_ah, 2)
+    metrics["battery_soc_source"] = 2   # 2 = estimator
+    metrics["battery_soc_confidence"] = round(soc_est.confidence, 3)
+    metrics["battery_soc_hw_rejected"] = 1 if soc_est.hw_rejected else 0
+    metrics["battery_external_charge_suspected"] = 1 if soc_est.external_charge_suspected else 0
+    metrics["battery_voltage_rest_estimate"] = round(soc_est.v_rest, 3)
+    metrics["battery_net_current"] = round(soc_est.i_net, 3)
+
+
 def read_rover_metrics():
     """Read metrics from Renogy Rover with enhanced error handling and batch reads."""
     global last_successful_connection, previous_over_discharge_count
@@ -429,7 +498,9 @@ def read_rover_metrics():
         if previous_over_discharge_count is not None and current_over_discharge_count is not None:
             if current_over_discharge_count > previous_over_discharge_count:
                 new_over_discharge_event = True
-        if current_over_discharge_count is not None:
+        if (current_over_discharge_count is not None
+                and current_over_discharge_count != previous_over_discharge_count):
+            # Write only on change: this runs every poll and the SD card wears
             previous_over_discharge_count = current_over_discharge_count
             _save_persisted_counters()
 
@@ -485,71 +556,11 @@ def read_rover_metrics():
             "modbus_failed_reads": rover.read_errors,
         }
 
-        # Override hardware SOC with coulomb counting when solar is off.
-        # The Renogy controller freezes its SOC register at the last charged value
-        # on LiFePO4 — it only updates during active charging cycles. We seed the
-        # counter from the hardware SOC register at the moment solar stops, since
-        # it was being actively updated during the charge cycle and reflects the
-        # true SOC far better than voltage under load (LiFePO4 has an extremely
-        # flat discharge curve and load current depresses voltage significantly).
-        #
-        # Hysteresis: switch TO coulomb mode when solar < 5W, back to hardware
-        # when solar clearly recovers above 25W.
-        global _using_voltage_soc, _cc_soc, _cc_last_time
-        _solar = metrics.get("solar_input_power")
-        _batt_v = metrics.get("battery_voltage")
-        _load_i = metrics.get("load_current")
-
-        if _solar is not None:
-            if _solar < 5:
-                _using_voltage_soc = True
-            elif _solar > 25:
-                _using_voltage_soc = False
-
-        if _using_voltage_soc and _batt_v is not None:
-            now = time.monotonic()
-            if _cc_soc is None:
-                # Seed from the hardware SOC register at the transition point.
-                # The controller was actively updating it during the charge cycle,
-                # so it reflects actual SOC. Fall back to voltage only if unavailable.
-                if battery_soc is not None:
-                    _cc_soc = float(battery_soc)
-                    logging.info(
-                        f"Coulomb counter seeded at {_cc_soc:.1f}% "
-                        f"from hardware SOC register (battery voltage {_batt_v:.2f}V)"
-                    )
-                else:
-                    seed = _voltage_to_soc(_batt_v)
-                    _cc_soc = seed if seed is not None else 50.0
-                    logging.info(
-                        f"Coulomb counter seeded at {_cc_soc:.1f}% "
-                        f"from battery voltage {_batt_v:.2f}V (hardware SOC unavailable)"
-                    )
-                _cc_last_time = now
-            else:
-                # Integrate discharge since last poll.
-                # Prefer load_current; fall back to load_power / battery_voltage.
-                if _cc_last_time is not None:
-                    dt_hours = (now - _cc_last_time) / 3600.0
-                    if _load_i is not None:
-                        discharge_a = _load_i
-                    elif metrics.get("load_power") is not None:
-                        discharge_a = metrics["load_power"] / _batt_v
-                    else:
-                        discharge_a = None
-                    if discharge_a is not None:
-                        _cc_soc -= (discharge_a * dt_hours / BATTERY_CAPACITY_AH) * 100.0
-                        _cc_soc = max(0.0, min(100.0, _cc_soc))
-                _cc_last_time = now
-
-            metrics["battery_soc"] = round(_cc_soc, 1)
-            metrics["battery_capacity_ah_remaining"] = round(
-                (_cc_soc / 100.0) * BATTERY_CAPACITY_AH, 2
-            )
-            metrics["battery_soc_source"] = 0   # 0 = coulomb counter
+        metrics["battery_soc_hw"] = battery_soc
+        metrics["battery_charging_current"] = rover.get_battery_charging_current()
+        if SOC_ESTIMATOR_ENABLED:
+            _update_soc_estimate(metrics, battery_soc)
         else:
-            _cc_soc = None
-            _cc_last_time = None
             metrics["battery_soc_source"] = 1   # 1 = hardware register
 
         # Invalidate batch cache after reading so next poll starts fresh
@@ -644,6 +655,28 @@ def check_daily_summary():
 def _c_to_f(c):
     """Convert Celsius to Fahrenheit."""
     return c * 9 / 5 + 32
+
+
+_low_v_latch = SustainedLatch()
+
+
+def _effective_voltage(metrics):
+    """Rest-equivalent voltage from the estimator, falling back to raw voltage."""
+    v = metrics.get("battery_voltage_rest_estimate")
+    return v if v is not None else metrics.get("battery_voltage")
+
+
+def _low_voltage_condition(metrics):
+    """Set after LOW_VOLTAGE_SUSTAINED_SECONDS below the threshold; cleared
+    after the same time above threshold + LOW_VOLTAGE_CLEAR_HYSTERESIS_V."""
+    v = _effective_voltage(metrics)
+    if v is None:
+        return _low_v_latch.active
+    return _low_v_latch.update(
+        v < LOW_BATTERY_VOLTAGE_THRESHOLD,
+        v >= LOW_BATTERY_VOLTAGE_THRESHOLD + LOW_VOLTAGE_CLEAR_HYSTERESIS_V,
+        LOW_VOLTAGE_SUSTAINED_SECONDS,
+    )
 
 
 def check_critical_conditions(metrics):
@@ -765,15 +798,19 @@ def check_critical_conditions(metrics):
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-    # Low battery voltage
-    if metrics["battery_voltage"] is not None and metrics["battery_voltage"] < LOW_BATTERY_VOLTAGE_THRESHOLD and not DISABLE_LOW_BATTERY_ALERTS:
+    # Low battery voltage: compares the load-compensated rest-equivalent voltage
+    # (the threshold is an at-rest value), sustained, with hysteresis so that
+    # charging voltage or a load step cannot toggle it.
+    if _low_voltage_condition(metrics) and not DISABLE_LOW_BATTERY_ALERTS:
         alert_type = 'low_battery_voltage'
         should_send, reason = alert_manager.should_send(alert_type)
         if should_send:
             subject = "Warning: Low Battery Voltage Alert"
             content = (
                 f"Battery voltage is critically low: {metrics['battery_voltage']:.2f}V\n"
-                f"Threshold: {LOW_BATTERY_VOLTAGE_THRESHOLD}V\n"
+                f"Rest-equivalent voltage: {_effective_voltage(metrics):.2f}V "
+                f"(below threshold for {LOW_VOLTAGE_SUSTAINED_SECONDS // 60} min)\n"
+                f"Threshold: {LOW_BATTERY_VOLTAGE_THRESHOLD}V (at rest)\n"
                 f"Battery SOC: {metrics['battery_soc']}%\n"
                 f"Remaining capacity: {metrics['battery_capacity_ah_remaining']:.1f}Ah / {BATTERY_CAPACITY_AH}Ah\n"
                 f"Solar input: {metrics['solar_input_power']}W\n"
@@ -1261,6 +1298,7 @@ except Exception as e:
     logging.critical(traceback.format_exc())
 finally:
     alert_manager.save()
+    _persist_soc_estimate(force=True)
     if watchdog:
         watchdog.stop()
     print("Renogy monitor stopped")

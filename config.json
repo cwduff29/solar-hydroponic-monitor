@@ -5,8 +5,27 @@
     "battery_capacity_ah": 50,
     "battery_nominal_voltage": 12.8,
     "battery_chemistry": "lifepo4",
+    "soc_estimator": {
+      "enabled": true,
+      "state_file": "/var/lib/renogy/soc_estimator.json",
+      "persist_interval_seconds": 300,
+      "charge_current_source": "solar_power",
+      "mppt_efficiency": 0.967,
+      "r_internal_ohm": 0.026,
+      "charge_efficiency": 0.99,
+      "unmetered_load_a": 0.0,
+      "full_charge_voltage": 14.0,
+      "full_charge_hold_seconds": 600,
+      "rest_full_voltage": 13.4,
+      "rest_full_hold_seconds": 1800,
+      "low_clamp_soc_pct": 20.0,
+      "low_clamp_hold_seconds": 300,
+      "restore_attempts": 3
+    },
     "thresholds": {
       "low_battery_voltage": 12.8,
+      "low_battery_voltage_sustained_seconds": 600,
+      "low_battery_voltage_clear_hysteresis_v": 0.2,
       "high_controller_temp_c": 45.0,
       "high_battery_temp_c": 50.0,
       "low_battery_temp_c": 0.0,
@@ -36,7 +55,7 @@
     },
     "relay": {
       "main_pump_terminal": "NC",
-      "backup_pump_terminal": "NO",
+      "backup_pump_terminal": "NC",
       "aeration_terminal": "NO",
       "fan_terminal": "NC",
       "active_low_board": true
@@ -70,7 +89,8 @@
       "water_temp_moderate_c": 20.0
     },
     "bme280": {
-      "i2c_address": 118
+      "i2c_address": 118,
+      "permission_wait_seconds": 30
     },
     "fan": {
       "temp_on_c": 26.7,
@@ -108,7 +128,27 @@
       "disable_threshold_pct": 30,
       "reduce_threshold_pct": 50,
       "normal_threshold_pct": 70,
-      "skip_pump_test_below_pct": 50
+      "skip_pump_test_below_pct": 50,
+      "tier_hysteresis_pct": 2
+    },
+    "main_pump_low_soc": {
+      "min_confidence": 0.3,
+      "reduced_speed": {
+        "enabled": false,
+        "enter_below_soc_pct": 40,
+        "exit_above_soc_pct": 50,
+        "duty_cycle_pct": 55
+      },
+      "cycling": {
+        "enabled": false,
+        "enter_below_soc_pct": 20,
+        "exit_above_soc_pct": 30,
+        "on_minutes": 15,
+        "off_minutes": 15,
+        "max_off_minutes": 30,
+        "skip_at_or_above_water_temp_c": 22.8,
+        "restart_grace_seconds": 60
+      }
     },
     "pump": {
       "test_interval_seconds": 172800,
@@ -138,18 +178,26 @@
       "max_consecutive_failures": 5
     },
     "main_pump_brushless_pwm": {
-      "enabled": false,
+      "enabled": true,
       "pwm_gpio": 12,
       "frequency_hz": 1000,
-      "default_duty_cycle_pct": 100,
-      "min_duty_cycle_pct": 0
+      "default_duty_cycle_pct": 70,
+      "min_duty_cycle_pct": 50,
+      "target_flow_lpm": 0,
+      "flow_control_kp": 1.0,
+      "flow_deadband_lpm": 0.1,
+      "flow_max_step_pct": 2.0
     }
   },
   "alerts": {
     "email_cooldown_minutes": 60,
     "email_reminder_hours": 12,
     "daily_summary_hour": 7,
-    "summary_interval_days": 7
+    "summary_interval_days": 7,
+    "smtp_timeout_seconds": 20,
+    "email_retry_interval_seconds": 60,
+    "email_retry_max_hours": 6,
+    "email_retry_max_queued": 20
   },
   "paths": {
     "renogy_prom": "/ramdisk/Renogy.prom",
@@ -171,8 +219,11 @@
     "interval_seconds": 30
   },
   "shutdown": {
+    "mode": "alert",
     "critical_soc_pct": 5,
-    "sustained_seconds": 120,
+    "min_confidence": 0.5,
+    "max_rest_voltage": 12.0,
+    "sustained_seconds": 600,
     "recovery_soc_pct": 15
   },
   "system": {
