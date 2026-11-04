@@ -52,6 +52,11 @@ RULES = [
      'The solar Pi booted {{ humanizeDuration $values.B.Value }} ago '
      '(power loss or buck converter brownout?).'),
 
+    ('solarpi-watchdog-reset', 'Solar Pi Watchdog Reset',
+     f'increase(pi_boot_reason_total{{{J},reason="watchdog"}}[1h])', 'gt', 0, '0s', 'warning', 'OK', 'Error',
+     'The solar Pi froze and was reset by the hardware watchdog in the last hour '
+     '(no orderly shutdown before the reset).'),
+
     ('solarpi-undervoltage', 'Solar Pi 5V Under-voltage',
      f'max_over_time(pi_undervoltage_alarm{{{J}}}[10m])', 'gt', 0, '0s', 'warning', 'OK', 'Error',
      'The Pi reported 5V supply under-voltage in the last 10 minutes.'),
