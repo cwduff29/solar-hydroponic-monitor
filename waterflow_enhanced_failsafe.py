@@ -258,6 +258,9 @@ PROM_TEMP_FILE   = get_config('paths.waterflow_prom_tmp',    '/ramdisk/waterflow
 STATE_FILE       = get_config('paths.waterflow_alert_state', '/ramdisk/waterflow_alerts.json')
 PERSISTENT_STATE_FILE = get_config('paths.waterflow_persistent_state', '/var/lib/renogy/waterflow_state.json')
 LOG_FILE_PATH    = get_config('paths.waterflow_log',         '/var/log/waterflow.log')
+BOOT_REASON_STATE_FILE = get_config('paths.boot_reason_state', '/var/lib/renogy/boot_reasons.json')
+# Written by clean-shutdown-marker.service during an orderly shutdown (systemd/)
+CLEAN_SHUTDOWN_MARKER = get_config('paths.clean_shutdown_marker', '/var/lib/renogy/clean_shutdown')
 
 # Daily summary hour
 DAILY_SUMMARY_HOUR = get_config('alerts.daily_summary_hour', 7)
@@ -481,6 +484,98 @@ def read_pi_undervoltage():
             return 1 if int(f.read().strip()) else 0
     except (OSError, ValueError):
         return None
+
+# Why the Pi last booted. The BCM2835 reset register (set by the firmware for
+# the current boot only) tells a power-on from a watchdog-style reset; a
+# software reboot also sets the watchdog bit, so the marker file written by
+# clean-shutdown-marker.service separates orderly reboots from freezes.
+RESET_STATUS_FILE = '/proc/device-tree/chosen/bootloader/rsts'
+BOOT_ID_FILE = '/proc/sys/kernel/random/boot_id'
+RSTS_POWER_ON = 0x1000        # HADPOR
+RSTS_WATCHDOG_FULL = 0x20     # HADWRF (watchdog full reset; also used by reboot)
+BOOT_REASONS = ('power_loss', 'halt', 'reboot', 'watchdog', 'unknown')
+_boot_reason_state = None     # set once at startup by record_boot_reason()
+
+def classify_boot(rsts, clean_shutdown):
+    """Boot reason from the reset register and whether the last shutdown was orderly."""
+    if rsts is None:
+        return 'unknown'
+    if rsts & RSTS_POWER_ON:
+        return 'halt' if clean_shutdown else 'power_loss'
+    if rsts & RSTS_WATCHDOG_FULL:
+        return 'reboot' if clean_shutdown else 'watchdog'
+    return 'unknown'
+
+def _read_small(path, binary=False):
+    try:
+        with open(path, 'rb' if binary else 'r') as f:
+            return f.read() if binary else f.read().strip()
+    except OSError:
+        return None
+
+def read_reset_status():
+    data = _read_small(RESET_STATUS_FILE, binary=True)
+    return int.from_bytes(data[:4], 'big') if data and len(data) >= 4 else None
+
+def record_boot_reason():
+    """Count this boot once per boot_id in BOOT_REASON_STATE_FILE and return the state.
+
+    Service restarts within one boot are not counted again. The first run with
+    no state file only records the boot (its cause can't be known), so the
+    counts start at zero. One small write per boot; never raises."""
+    state = {'counts': {r: 0 for r in BOOT_REASONS}, 'boot_id': None,
+             'last_reason': 'unknown', 'rsts': None}
+    try:
+        try:
+            with open(BOOT_REASON_STATE_FILE) as f:
+                saved = json.load(f)
+            state['counts'].update({r: int(n) for r, n in saved.get('counts', {}).items()})
+            first_run = False
+            for k in ('boot_id', 'last_reason', 'rsts'):
+                state[k] = saved.get(k, state[k])
+        except FileNotFoundError:
+            first_run = True
+        except (OSError, ValueError, AttributeError) as e:
+            logging.warning(f"Boot reason state unreadable ({e}); starting the counts again")
+            first_run = True
+
+        boot_id = _read_small(BOOT_ID_FILE)
+        if not boot_id or boot_id == state['boot_id']:
+            return state                      # already counted (service restart)
+
+        previous_boot = state['boot_id']
+        rsts = read_reset_status()
+        marker = _read_small(CLEAN_SHUTDOWN_MARKER)
+        # The marker names the boot that shut down cleanly; it must be the
+        # boot we saw last, so a stale marker can't hide a later freeze.
+        clean = bool(marker) and marker != boot_id and (previous_boot is None or marker == previous_boot)
+        reason = 'unknown' if first_run else classify_boot(rsts, clean)
+        if not first_run:
+            state['counts'][reason] = state['counts'].get(reason, 0) + 1
+        state.update(boot_id=boot_id, last_reason=reason,
+                     rsts=None if rsts is None else f'0x{rsts:x}')
+
+        tmp = BOOT_REASON_STATE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, BOOT_REASON_STATE_FILE)
+        try:
+            os.remove(CLEAN_SHUTDOWN_MARKER)
+        except FileNotFoundError:
+            pass
+
+        msg = (f"Boot reason: {reason} (rsts={state['rsts']}, clean shutdown marker "
+               f"{'matched' if clean else 'absent' if not marker else 'stale'}"
+               f"{', first run: not counted' if first_run else ''})")
+        if reason in ('power_loss', 'watchdog'):
+            logging.warning(msg)
+        else:
+            logging.info(msg)
+    except Exception as e:                      # never block startup
+        logging.error(f"Boot reason not recorded: {e}")
+    return state
 
 def wait_for_device_access(path, timeout_s, poll_s=1.0):
     """Wait until path is readable and writable; returns True if it is."""
@@ -2251,6 +2346,16 @@ def write_prometheus_metrics(temps=None, conditions=None):
                 f.write("# TYPE pi_undervoltage_alarm gauge\n")
                 f.write(f"pi_undervoltage_alarm{{source=\"waterflow\"}} {undervoltage}\n")
 
+            if _boot_reason_state is not None:
+                f.write("# HELP pi_boot_reason_total Pi boots by cause (reset register + clean-shutdown marker)\n")
+                f.write("# TYPE pi_boot_reason_total counter\n")
+                for reason in BOOT_REASONS:
+                    n = _boot_reason_state['counts'].get(reason, 0)
+                    f.write(f'pi_boot_reason_total{{reason="{reason}",source="waterflow"}} {n}\n')
+                f.write("# HELP pi_last_boot_reason Cause of the current boot (1 = this reason)\n")
+                f.write("# TYPE pi_last_boot_reason gauge\n")
+                f.write(f'pi_last_boot_reason{{reason="{_boot_reason_state["last_reason"]}",source="waterflow"}} 1\n')
+
             # Aeration
             f.write("# HELP aeration_state Aeration pump state\n")
             f.write("# TYPE aeration_state gauge\n")
@@ -2508,7 +2613,7 @@ def send_startup_notification():
 
 def main():
     """Main monitoring loop"""
-    global consecutive_failures
+    global consecutive_failures, _boot_reason_state
 
     print("=" * 70)
     print("   HYDROPONIC MONITORING - ENHANCED VERSION")
@@ -2537,6 +2642,7 @@ def main():
 
     setup_gpio()
     load_state()
+    _boot_reason_state = record_boot_reason()
 
     # Cache DS18B20 sensor paths at startup (#5)
     _discover_and_cache_sensors()
