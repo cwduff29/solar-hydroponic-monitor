@@ -303,10 +303,11 @@ Find your UID in Grafana under **Connections → Data Sources → (your datasour
 
 `grafana/solar-enhanced-dashboard.json` is an export of the dashboard actually
 running in Grafana (uid `solar_enhanced`), including the boot-cause panels and
-the Pi system panels filtered to `job="solar_hydroponic"`. Every query uses the
-`prometheus` datasource (LXC 108, uid `efun0ldncfhtsc`); replace that UID as
-above if yours differs. It does not yet include the energy-budget, flow-trend
-and alert-state panels (ids 1000-1016) from the pre-built dashboard.
+the Pi system panels filtered to `job="solar_hydroponic"`, and the Battery &
+Energy and Flow & Alerts sections taken from the pre-built dashboard (all of its
+panels 1000-1016 except the duplicate Water Temperatures and Leak Detected).
+Every query uses the `prometheus` datasource (LXC 108, uid `efun0ldncfhtsc`);
+replace that UID as above if yours differs.
 
 ## Service Management
 
