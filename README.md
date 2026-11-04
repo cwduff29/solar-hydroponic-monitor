@@ -299,6 +299,15 @@ sed -i 's/"uid": "bev6xt3wf7n5sb"/"uid": "YOUR_UID_HERE"/g' \
 
 Find your UID in Grafana under **Connections → Data Sources → (your datasource)** — it appears in the browser URL.
 
+### Live dashboard export
+
+`grafana/solar-enhanced-dashboard.json` is an export of the dashboard actually
+running in Grafana (uid `solar_enhanced`), including the boot-cause panels and
+the Pi system panels filtered to `job="solar_hydroponic"`. Every query uses the
+`prometheus` datasource (LXC 108, uid `efun0ldncfhtsc`); replace that UID as
+above if yours differs. It does not yet include the energy-budget, flow-trend
+and alert-state panels (ids 1000-1016) from the pre-built dashboard.
+
 ## Service Management
 
 ```bash
