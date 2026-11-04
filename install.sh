@@ -283,9 +283,13 @@ sed -e "s|__USER__|$SERVICE_USER|g" \
 sed -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/battery_shutdown.service" > /etc/systemd/system/battery_shutdown.service
 
+# Marks orderly shutdowns; waterflow uses it to tell reboots from watchdog resets
+cp "$INSTALL_DIR/systemd/clean-shutdown-marker.service" /etc/systemd/system/clean-shutdown-marker.service
+
 systemctl daemon-reload
 systemctl enable renogy.service waterflow.service battery_shutdown.service
-echo "      Services enabled (renogy, waterflow, battery_shutdown)."
+systemctl enable --now clean-shutdown-marker.service
+echo "      Services enabled (renogy, waterflow, battery_shutdown, clean-shutdown-marker)."
 
 # Only start if credentials have been filled in
 if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then
