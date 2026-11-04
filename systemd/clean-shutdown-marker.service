@@ -1,0 +1,17 @@
+[Unit]
+# Writes a marker during an orderly shutdown or reboot so waterflow can tell a
+# normal reboot from a watchdog reset after a freeze (pi_boot_reason_total).
+# The marker holds the shutting-down boot's id; waterflow reads and deletes it
+# at the next boot. Path must match paths.clean_shutdown_marker in config.json.
+Description=Mark orderly shutdowns for the boot-reason metric
+After=local-fs.target
+RequiresMountsFor=/var/lib/renogy
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/bin/sh -c 'cat /proc/sys/kernel/random/boot_id > /var/lib/renogy/clean_shutdown.tmp && mv -f /var/lib/renogy/clean_shutdown.tmp /var/lib/renogy/clean_shutdown && sync'
+
+[Install]
+WantedBy=multi-user.target
