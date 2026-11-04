@@ -208,6 +208,8 @@
     "waterflow_alert_state": "/ramdisk/waterflow_alerts.json",
     "renogy_persistent_state": "/var/lib/renogy/renogy_state.json",
     "waterflow_persistent_state": "/var/lib/renogy/waterflow_state.json",
+    "boot_reason_state": "/var/lib/renogy/boot_reasons.json",
+    "clean_shutdown_marker": "/var/lib/renogy/clean_shutdown",
     "renogy_log": "/var/log/renogy.log",
     "waterflow_log": "/var/log/waterflow.log",
     "battery_data_file": "/ramdisk/Renogy.prom",
