@@ -10,6 +10,17 @@ SERVICE_USER="${SUDO_USER:-pi}"
 CREDS_DIR="/etc/solar-hydroponic"
 CREDS_FILE="$CREDS_DIR/credentials.env"
 
+# Local Prometheus on the Pi is optional and off by default: the Pi is scraped
+# by a central Prometheus, and a local TSDB is the largest source of SD writes.
+#   sudo INSTALL_LOCAL_PROMETHEUS=1 bash install.sh
+INSTALL_LOCAL_PROMETHEUS="${INSTALL_LOCAL_PROMETHEUS:-0}"
+# Hosts allowed to reach node_exporter (:9100), and :9090 if local Prometheus is on.
+SCRAPE_HOSTS="${SCRAPE_HOSTS:-192.168.99.201 192.168.99.224}"
+# WiFi self-heal timer: cycles the radio, re-authorizes the USB dongle and, after
+# about 12 min without the gateway, reboots the Pi (at most 3 times in a row).
+# INSTALL_WIFI_HEAL=0 skips it.
+INSTALL_WIFI_HEAL="${INSTALL_WIFI_HEAL:-1}"
+
 # Check root
 if [[ $EUID -ne 0 ]]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -22,6 +33,9 @@ echo "================================================="
 echo " Install directory : $INSTALL_DIR"
 echo " Service user      : $SERVICE_USER"
 echo " Credentials file  : $CREDS_FILE"
+echo " Local Prometheus  : $([[ $INSTALL_LOCAL_PROMETHEUS == 1 ]] && echo yes || echo 'no (INSTALL_LOCAL_PROMETHEUS=1 to enable)')"
+echo " Scrape hosts      : $SCRAPE_HOSTS"
+echo " WiFi self-heal    : $([[ $INSTALL_WIFI_HEAL == 1 ]] && echo yes || echo 'no (INSTALL_WIFI_HEAL=0)')"
 echo "================================================="
 echo ""
 
@@ -69,12 +83,15 @@ echo "[1/13] Installing Python packages..."
 # Older kernels (Pi OS Bullseye and earlier) expose gpiochip0 and work with RPi.GPIO.
 # Newer kernels (Pi OS Bookworm+) expose gpiochip512+ and require rpi-lgpio, which is
 # a drop-in RPi.GPIO replacement backed by lgpio instead of the broken sysfs interface.
-GPIO_PKG="RPi.GPIO"
-GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1)
+# A kernel without the sysfs GPIO class at all is newer still and also needs rpi-lgpio.
+# (|| true: under pipefail an empty match would otherwise end the installer silently.)
+GPIO_PKG="RPi.GPIO==0.7.1"
+GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1 || true)
 GPIO_CHIP_NUM=${GPIO_CHIP#gpiochip}
-if [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
-    echo "      Detected new-style GPIO chip ($GPIO_CHIP) — using rpi-lgpio"
-    GPIO_PKG="rpi-lgpio"
+if [[ -z "$GPIO_CHIP" && -e /dev/gpiochip0 ]] \
+        || [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
+    echo "      Detected new-style GPIO (${GPIO_CHIP:-no sysfs GPIO class}) — using rpi-lgpio"
+    GPIO_PKG="rpi-lgpio==0.6"
     # Remove pip-installed RPi.GPIO if present; it shadows rpi-lgpio and breaks edge detection
     pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
     pip3 uninstall -y RPi.GPIO 2>/dev/null || true
@@ -82,15 +99,21 @@ else
     echo "      Detected legacy GPIO chip (${GPIO_CHIP:-unknown}) — using RPi.GPIO"
 fi
 
-pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
-pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280
+# Versions are pinned (requirements.txt, and the GPIO package above) so that a
+# reinstall gets the versions that were tested, not whatever PyPI serves that day.
+pip3 install -r "$INSTALL_DIR/requirements.txt" "$GPIO_PKG" --break-system-packages 2>/dev/null || \
+pip3 install -r "$INSTALL_DIR/requirements.txt" "$GPIO_PKG"
 echo "      Done."
 
 # --- [2/13] Prometheus node_exporter ---
 echo "[2/13] Installing Prometheus node_exporter..."
 apt-get install -y prometheus-node-exporter
 
-# Override service to add textfile collector pointing at /ramdisk
+# Override service to add textfile collector pointing at /ramdisk.
+# Off to keep the Pi Zero's scrape cheap: systemd and processes (CPU), and
+# hwmon, which reads every DS18B20 on the 1-wire bus (~2 s each, contending
+# with waterflow's reads). CPU temperature comes from the thermal_zone
+# collector; waterflow exports the 5V under-voltage alarm itself.
 NEXPORTER_OVERRIDE="/etc/systemd/system/prometheus-node-exporter.service.d"
 mkdir -p "$NEXPORTER_OVERRIDE"
 cat > "$NEXPORTER_OVERRIDE/textfile.conf" << 'EOF'
@@ -98,8 +121,9 @@ cat > "$NEXPORTER_OVERRIDE/textfile.conf" << 'EOF'
 ExecStart=
 ExecStart=/usr/bin/prometheus-node-exporter \
   --collector.textfile.directory=/ramdisk \
-  --collector.systemd \
-  --collector.processes
+  --no-collector.systemd \
+  --no-collector.processes \
+  --no-collector.hwmon
 EOF
 systemctl daemon-reload
 systemctl enable prometheus-node-exporter
@@ -108,20 +132,30 @@ echo "      node_exporter installed and configured."
 echo "      Textfile collector : /ramdisk/*.prom"
 echo "      Metrics endpoint   : http://$(hostname -I | awk '{print $1}'):9100/metrics"
 
-# --- [3/13] Prometheus ---
-echo "[3/13] Installing Prometheus..."
-apt-get install -y prometheus
+# --- [3/13] Prometheus (optional) ---
+if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+    echo "[3/13] Installing local Prometheus..."
+    apt-get install -y prometheus
 
-# Install our scrape config
-mkdir -p /etc/prometheus
-cp "$INSTALL_DIR/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
-chown prometheus:prometheus /etc/prometheus/prometheus.yml 2>/dev/null || true
-systemctl enable prometheus
-systemctl restart prometheus
-echo "      Prometheus installed and configured."
-echo "      Scraping            : localhost:9100"
-echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
-echo "      NOTE: Point your Grafana datasource at http://<PI_IP>:9090"
+    # Install our scrape config
+    mkdir -p /etc/prometheus
+    cp "$INSTALL_DIR/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
+    chown prometheus:prometheus /etc/prometheus/prometheus.yml 2>/dev/null || true
+    systemctl enable prometheus
+    systemctl restart prometheus
+    echo "      Prometheus installed and configured."
+    echo "      Scraping            : localhost:9100"
+    echo "      Web UI              : http://$(hostname -I | awk '{print $1}'):9090"
+else
+    echo "[3/13] Local Prometheus skipped (scrape :9100 from your central Prometheus)."
+    if systemctl list-unit-files prometheus.service &>/dev/null \
+            && systemctl is-enabled --quiet prometheus 2>/dev/null; then
+        systemctl disable --now prometheus
+        echo "      Existing local prometheus service stopped and disabled."
+        echo "      Its data in /var/lib/prometheus was left in place; remove it with:"
+        echo "        sudo apt-get purge prometheus && sudo rm -rf /var/lib/prometheus"
+    fi
+fi
 
 # --- [4/13] Firewall (ufw) ---
 echo "[4/13] Configuring firewall..."
@@ -129,24 +163,30 @@ if command -v ufw &>/dev/null; then
     # Ensure SSH is allowed before enabling ufw (don't lock ourselves out)
     ufw allow OpenSSH 2>/dev/null || ufw allow 22/tcp
 
-    # Allow Prometheus and node_exporter from local network
-    # Default to whole RFC1918 private ranges; user can tighten later
-    ufw allow from 10.0.0.0/8 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 172.16.0.0/12 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 192.168.0.0/16 to any port 9090 comment 'Prometheus (solar monitor)'
-    ufw allow from 10.0.0.0/8 to any port 9100 comment 'node_exporter (solar monitor)'
-    ufw allow from 172.16.0.0/12 to any port 9100 comment 'node_exporter (solar monitor)'
-    ufw allow from 192.168.0.0/16 to any port 9100 comment 'node_exporter (solar monitor)'
+    # Remove the broad private-range rules older versions of this script added
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        for port in 9090 9100; do
+            ufw delete allow from "$net" to any port "$port" >/dev/null 2>&1 || true
+        done
+    done
+
+    # Allow only the scrape/Grafana hosts (ufw skips rules that already exist)
+    for host in $SCRAPE_HOSTS; do
+        ufw allow from "$host" to any port 9100 proto tcp comment 'node_exporter (solar monitor)'
+        if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+            ufw allow from "$host" to any port 9090 proto tcp comment 'Prometheus (solar monitor)'
+        else
+            ufw delete allow from "$host" to any port 9090 proto tcp >/dev/null 2>&1 || true
+        fi
+    done
 
     # Enable ufw non-interactively
     ufw --force enable
-    echo "      Firewall configured. Ports 9090 and 9100 open to private networks."
-    echo "      To restrict to a specific host:"
-    echo "        sudo ufw delete allow from 192.168.0.0/16 to any port 9090"
-    echo "        sudo ufw allow from <HOST_IP> to any port 9090"
+    echo "      Firewall configured. Port 9100$([[ $INSTALL_LOCAL_PROMETHEUS == 1 ]] && echo ' and 9090') open to: $SCRAPE_HOSTS"
+    echo "      Change the list with: sudo SCRAPE_HOSTS='a.b.c.d e.f.g.h' bash install.sh"
 else
     echo "      ufw not found — skipping firewall setup."
-    echo "      Manually allow ports 9090 and 9100 from your Grafana host."
+    echo "      Manually allow port 9100 from: $SCRAPE_HOSTS"
 fi
 
 # --- [5/13] Hardware interfaces ---
@@ -165,30 +205,57 @@ else
     echo "        - 1-Wire"
 fi
 
-# --- [6/13] Hardware watchdog ---
-echo "[6/13] Hardware watchdog — skipped (disabled by default)."
-echo "      The watchdog is off by default (watchdog.enabled=false in config.json)."
-echo "      To enable: set watchdog.enabled=true in config.json, then manually add"
-echo "        dtparam=watchdog=on to /boot/firmware/config.txt and reboot."
+# MediaTek MT76 USB WiFi dongle (vendor 0e8d, e.g. Panda PAU0B / MT7610U):
+# turn off USB scatter-gather, which stalls on the Pi Zero's USB controller.
+if grep -qs '^mt76_usb ' /proc/modules || grep -qsx '0e8d' /sys/bus/usb/devices/*/idVendor; then
+    cp "$INSTALL_DIR/modprobe/mt76-usb.conf" /etc/modprobe.d/mt76-usb.conf
+    echo "      MT76 USB WiFi found: installed /etc/modprobe.d/mt76-usb.conf (disable_usb_sg=1, after reboot)."
+fi
+
+# --- [6/13] Hardware watchdog and crash capture ---
+echo "[6/13] Enabling the hardware watchdog (systemd)..."
+# systemd pets the BCM2835 watchdog, so a frozen Pi resets itself after 60 s.
+# The Pi kernel loads bcm2835_wdt without dtparam=watchdog=on.
+mkdir -p /etc/systemd/system.conf.d
+cp "$INSTALL_DIR/systemd/watchdog.conf" /etc/systemd/system.conf.d/watchdog.conf
+echo "      Installed /etc/systemd/system.conf.d/watchdog.conf (60 s runtime, 2 min reboot)."
+echo "      Takes effect at the next reboot."
+echo "      Keep watchdog.enabled=false in config.json: systemd owns /dev/watchdog."
+
+# Crash capture: ramoops keeps the kernel console in RAM across a watchdog
+# reset, and systemd-pstore saves it to /var/lib/systemd/pstore at the next boot.
+echo "      Enabling crash capture (ramoops)..."
+BOOT_CONFIG=/boot/firmware/config.txt
+[[ -f $BOOT_CONFIG ]] || BOOT_CONFIG=/boot/config.txt
+RAMOOPS_LINE='dtoverlay=ramoops,total-size=0x20000,record-size=0x4000,console-size=0x8000'
+if [[ ! -f $BOOT_CONFIG ]]; then
+    echo "      config.txt not found. Add this line under [all] manually:"
+    echo "        $RAMOOPS_LINE"
+elif grep -q '^dtoverlay=ramoops' "$BOOT_CONFIG"; then
+    echo "      ramoops overlay already in $BOOT_CONFIG."
+else
+    cp -p "$BOOT_CONFIG" "$BOOT_CONFIG.bak-install-$(date +%Y%m%d)"
+    # The overlay must apply to every board, so it goes in an [all] section.
+    if [[ "$(grep -E '^\[' "$BOOT_CONFIG" | tail -1 || true)" != "[all]" ]]; then
+        echo "[all]" >> "$BOOT_CONFIG"
+    fi
+    {
+        echo "# Keep kernel crash/console logs across a watchdog reset (see /var/lib/systemd/pstore)"
+        echo "$RAMOOPS_LINE"
+    } >> "$BOOT_CONFIG"
+    echo "      Added the ramoops overlay to $BOOT_CONFIG (backup: $BOOT_CONFIG.bak-install-$(date +%Y%m%d))."
+fi
+cp "$INSTALL_DIR/sysctl/99-zz-crash-capture.conf" /etc/sysctl.d/99-zz-crash-capture.conf
+sysctl -q -p /etc/sysctl.d/99-zz-crash-capture.conf
+echo "      Installed /etc/sysctl.d/99-zz-crash-capture.conf (kernel errors reach ramoops)."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
 
-# Create watchdog group and udev rule if needed (not present by default on Pi OS)
-if ! getent group watchdog &>/dev/null; then
-    groupadd --system watchdog
-    echo "      Created system group: watchdog"
-fi
-WATCHDOG_UDEV="/etc/udev/rules.d/60-watchdog.rules"
-if [[ ! -f "$WATCHDOG_UDEV" ]]; then
-    echo 'KERNEL=="watchdog", GROUP="watchdog", MODE="0660"' > "$WATCHDOG_UDEV"
-    udevadm control --reload-rules
-    udevadm trigger --name-match=watchdog 2>/dev/null || true
-    echo "      Created udev rule: $WATCHDOG_UDEV"
-fi
-
-usermod -aG dialout,gpio,i2c,watchdog "$SERVICE_USER"
-echo "      Added to: dialout (serial), gpio, i2c, watchdog"
+# No watchdog group: systemd (PID 1) owns /dev/watchdog (step 6), so the
+# services never open it. A group and udev rule left by an older install are harmless.
+usermod -aG dialout,gpio,i2c "$SERVICE_USER"
+echo "      Added to: dialout (serial), gpio, i2c"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
 # --- [8/13] Ramdisk ---
@@ -250,12 +317,40 @@ sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/waterflow.service" > /etc/systemd/system/waterflow.service
 
+# battery_shutdown runs as root, so its code must not live in a directory the
+# service user can write to: it runs from a root-owned copy. Re-run this
+# installer after changing battery_shutdown.py. (config.json stays in the
+# install directory so the shutdown settings can still be edited there.)
+ROOT_LIB=/usr/local/lib/solar-hydroponic
+install -d -o root -g root -m 755 "$ROOT_LIB"
+install -o root -g root -m 644 "$INSTALL_DIR/battery_shutdown.py" "$ROOT_LIB/battery_shutdown.py"
 sed -e "s|__DIR__|$INSTALL_DIR|g" \
+    -e "s|__LIB__|$ROOT_LIB|g" \
     "$INSTALL_DIR/systemd/battery_shutdown.service" > /etc/systemd/system/battery_shutdown.service
+
+# Marks orderly shutdowns; waterflow uses it to tell reboots from watchdog resets
+cp "$INSTALL_DIR/systemd/clean-shutdown-marker.service" /etc/systemd/system/clean-shutdown-marker.service
 
 systemctl daemon-reload
 systemctl enable renogy.service waterflow.service battery_shutdown.service
-echo "      Services enabled (renogy, waterflow, battery_shutdown)."
+systemctl enable --now clean-shutdown-marker.service
+echo "      Services enabled (renogy, waterflow, battery_shutdown, clean-shutdown-marker)."
+
+if [[ "$INSTALL_WIFI_HEAL" == "1" ]]; then
+    GW="${WIFI_HEAL_GATEWAY:-$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || true)}"
+    if [[ -z "$GW" ]]; then
+        echo "      wifi-heal skipped: no default gateway found (set WIFI_HEAL_GATEWAY=a.b.c.d)."
+    else
+        sed -e "s|__GW__|$GW|g" "$INSTALL_DIR/scripts/wifi-heal.sh" > /usr/local/bin/wifi-heal.sh
+        chmod 755 /usr/local/bin/wifi-heal.sh
+        cp "$INSTALL_DIR/systemd/wifi-heal.service" "$INSTALL_DIR/systemd/wifi-heal.timer" /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable --now wifi-heal.timer
+        echo "      wifi-heal.timer enabled (pings the default gateway every 2 min; $GW until it has seen one)."
+    fi
+else
+    echo "      wifi-heal skipped (INSTALL_WIFI_HEAL=0)."
+fi
 
 # Only start if credentials have been filled in
 if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then
@@ -281,21 +376,23 @@ echo "        sudo nano $CREDS_FILE"
 echo "   2. Reboot to apply interface, watchdog, and group changes:"
 echo "        sudo reboot"
 echo ""
-echo " Grafana datasource:"
-echo "   Add a Prometheus datasource pointing at:"
-echo "   http://$(hostname -I | awk '{print $1}'):9090"
+echo " Prometheus scrape job (on your central Prometheus):"
+echo "   - job_name: solar_hydroponic"
+echo "     static_configs: [{targets: ['$(hostname -I | awk '{print $1}'):9100']}]"
 echo ""
 echo " Config reload without restart (SIGHUP):"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value renogy)"
 echo "   sudo kill -HUP \$(systemctl show -p MainPID --value waterflow)"
 echo ""
 echo " Service management:"
-echo "   sudo systemctl status renogy waterflow battery_shutdown prometheus prometheus-node-exporter"
+echo "   sudo systemctl status renogy waterflow battery_shutdown prometheus-node-exporter"
 echo "   sudo journalctl -u renogy -f"
 echo "   sudo journalctl -u waterflow -f"
 echo "   sudo journalctl -u battery_shutdown -f"
 echo ""
 echo " Verify metrics:"
 echo "   curl http://localhost:9100/metrics | grep waterflow_inlet_lpm"
-echo "   curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm"
+if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
+    echo "   curl http://localhost:9090/api/v1/query?query=waterflow_inlet_lpm"
+fi
 echo ""

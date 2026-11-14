@@ -693,7 +693,54 @@
           },
           "unit": "percent"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hardware register"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    6
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Estimator confidence"
+            },
+            "properties": [
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -727,12 +774,31 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "battery_soc{source=\"renogy\"}",
-          "legendFormat": "Battery SOC",
+          "legendFormat": "SOC estimate",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "battery_soc_hw{source=\"renogy\"}",
+          "legendFormat": "Hardware register",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "battery_soc_confidence{source=\"renogy\"} * 100",
+          "legendFormat": "Estimator confidence",
+          "refId": "C"
         }
       ],
-      "title": "Battery State of Charge",
-      "type": "timeseries"
+      "title": "Battery State of Charge (estimate vs hardware register)",
+      "type": "timeseries",
+      "description": "battery_soc is the net-current estimator (soc_estimator.py). battery_soc_hw is the Renogy register, which is voltage-driven and unreliable on LiFePO4. Confidence falls between full/empty anchors and after outages bridged with the controller counters."
     },
     {
       "datasource": {
@@ -3600,7 +3666,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "node_hwmon_temp_celsius{chip=~\"cpu_thermal|thermal_thermal_zone0\",sensor=~\"temp0|temp1\"}",
+          "expr": "node_thermal_zone_temp{type=\"cpu-thermal\"}",
           "refId": "A"
         }
       ],
@@ -4405,7 +4471,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "node_hwmon_temp_celsius{chip=~\"cpu_thermal|thermal_thermal_zone0\",sensor=~\"temp0|temp1\"}",
+          "expr": "node_thermal_zone_temp{type=\"cpu-thermal\"}",
           "legendFormat": "CPU Temperature",
           "refId": "A"
         },
@@ -5397,19 +5463,24 @@
           },
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
+                  "text": "Normal",
                   "color": "green",
-                  "index": 0,
-                  "text": "Normal"
+                  "index": 0
                 },
                 "1": {
+                  "text": "Reduced",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "Disabled",
                   "color": "red",
-                  "index": 1,
-                  "text": "LOAD SHEDDING"
+                  "index": 2
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "thresholds": {
@@ -5420,8 +5491,12 @@
                 "value": 0
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
               }
             ]
           }
@@ -5459,12 +5534,522 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "waterflow_alert_load_shed_active{source=\"waterflow\"}",
-          "legendFormat": "Load Shed Active",
+          "expr": "waterflow_load_shed_tier{source=\"waterflow\"}",
+          "legendFormat": "Tier",
           "refId": "A"
         }
       ],
-      "title": "Load Shed Active",
+      "title": "Load Shed Tier",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bev6xt3wf7n5sb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ah in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ah out"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Net"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 148
+      },
+      "id": 1012,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(total_charging_ah{source=\"renogy\"}[1d])",
+          "legendFormat": "Ah in",
+          "refId": "A",
+          "interval": "1d"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(total_discharging_ah{source=\"renogy\"}[1d])",
+          "legendFormat": "Ah out",
+          "refId": "B",
+          "interval": "1d"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(total_charging_ah{source=\"renogy\"}[1d]) - increase(total_discharging_ah{source=\"renogy\"}[1d])",
+          "legendFormat": "Net",
+          "refId": "C",
+          "interval": "1d"
+        }
+      ],
+      "title": "Daily Battery Ah In / Out (controller counters)",
+      "type": "timeseries",
+      "description": "increase() of the controller's cumulative charging/discharging Ah counters per day. These keep counting while the Pi is off. Net < 0 means the battery lost charge that day.",
+      "interval": "1d"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bev6xt3wf7n5sb"
+      },
+      "description": "waterflow.main_pump_low_soc tiers (disabled by default).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Normal",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Reduced speed",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "Cycling",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 148
+      },
+      "id": 1013,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "waterflow_main_pump_mode{source=\"waterflow\"}",
+          "legendFormat": "Main Pump Low-SOC Mode",
+          "refId": "A"
+        }
+      ],
+      "title": "Main Pump Low-SOC Mode",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bev6xt3wf7n5sb"
+      },
+      "description": "battery_shutdown.py: SOC <= critical with confidence and rest voltage confirming (mode alert/halt).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "CRITICAL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 148
+      },
+      "id": 1014,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "battery_shutdown_condition{source=\"battery_shutdown\"}",
+          "legendFormat": "Critical Battery Condition",
+          "refId": "A"
+        }
+      ],
+      "title": "Critical Battery Condition",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bev6xt3wf7n5sb"
+      },
+      "description": "1.0 right after a full/empty anchor; falls as uncertainty grows.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {}
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 152
+      },
+      "id": 1015,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "battery_soc_confidence{source=\"renogy\"} * 100",
+          "legendFormat": "SOC Estimator Confidence",
+          "refId": "A"
+        }
+      ],
+      "title": "SOC Estimator Confidence",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "bev6xt3wf7n5sb"
+      },
+      "description": "Voltage is above what the metered current allows (charger on the battery terminals).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "No",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Yes",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 152
+      },
+      "id": 1016,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "battery_external_charge_suspected{source=\"renogy\"}",
+          "legendFormat": "External Charge Suspected",
+          "refId": "A"
+        }
+      ],
+      "title": "External Charge Suspected",
       "type": "stat"
     }
   ],

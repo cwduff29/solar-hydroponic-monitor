@@ -94,6 +94,26 @@ class RenogyRoverExtended(RenogyChargeController):
                     raise
         return None
 
+    def retriable_read_register(self, registeraddress, number_of_decimals=0,
+                                functioncode=3, signed=False):
+        """
+        The base class's getters (battery voltage, SOC, solar, load,
+        temperatures, daily min/max) all read through this method. Serve them
+        from the batch cache too; without this override every one of them made
+        its own bus transaction after batch_read() had already fetched the value.
+
+        Applies the same scaling as minimalmodbus.read_register().
+        """
+        if functioncode == 3:
+            raw = self._get_from_cache(registeraddress)
+            if raw is not None:
+                if signed and raw >= 0x8000:
+                    raw -= 0x10000
+                return raw / float(10 ** number_of_decimals) if number_of_decimals else raw
+        self.total_reads += 1
+        return super().retriable_read_register(
+            registeraddress, number_of_decimals, functioncode, signed)
+
     def read_registers_with_retry(self, start_address, count):
         """
         Read multiple registers with retry logic.
@@ -105,6 +125,11 @@ class RenogyRoverExtended(RenogyChargeController):
         Returns:
             List of register values or None on failure
         """
+        # Served from the batch cache when batch_read() covered the whole range
+        cached = [self._get_from_cache(start_address + i) for i in range(count)]
+        if cached and all(v is not None for v in cached):
+            return cached
+
         self.total_reads += 1
 
         for attempt in range(self.max_retries):

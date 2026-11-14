@@ -7,7 +7,9 @@ Wants=renogy.service
 Type=simple
 User=root
 EnvironmentFile=/etc/solar-hydroponic/credentials.env
-ExecStart=/usr/bin/python3 __DIR__/battery_shutdown.py __DIR__/config.json
+# Root-owned copy of the script (install.sh puts it in __LIB__); only the
+# config file is read from the install directory.
+ExecStart=/usr/bin/python3 __LIB__/battery_shutdown.py __DIR__/config.json
 Restart=always
 RestartSec=30
 StandardOutput=journal

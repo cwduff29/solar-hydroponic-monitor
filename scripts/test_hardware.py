@@ -60,7 +60,7 @@ _DEFAULT_CONFIG = {
         },
         'relay': {
             'main_pump_terminal':   'NC',
-            'backup_pump_terminal': 'NO',
+            'backup_pump_terminal': 'NC',
             'aeration_terminal':    'NO',
             'fan_terminal':         'NC',
             'active_low_board':     True,
@@ -275,7 +275,7 @@ def test_relays(config):
         ('main_pump',   get_cfg(config, 'waterflow.gpio.main_pump_relay',   22),
                         get_cfg(config, 'waterflow.relay.main_pump_terminal',   'NC')),
         ('backup_pump', get_cfg(config, 'waterflow.gpio.backup_pump_relay', 23),
-                        get_cfg(config, 'waterflow.relay.backup_pump_terminal', 'NO')),
+                        get_cfg(config, 'waterflow.relay.backup_pump_terminal', 'NC')),
         ('aeration',    get_cfg(config, 'waterflow.gpio.aeration_pump',     24),
                         get_cfg(config, 'waterflow.relay.aeration_terminal',    'NO')),
         ('fan',         get_cfg(config, 'waterflow.gpio.fan_control',       25),
