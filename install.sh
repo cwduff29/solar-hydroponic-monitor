@@ -82,11 +82,14 @@ echo "[1/13] Installing Python packages..."
 # Older kernels (Pi OS Bullseye and earlier) expose gpiochip0 and work with RPi.GPIO.
 # Newer kernels (Pi OS Bookworm+) expose gpiochip512+ and require rpi-lgpio, which is
 # a drop-in RPi.GPIO replacement backed by lgpio instead of the broken sysfs interface.
+# A kernel without the sysfs GPIO class at all is newer still and also needs rpi-lgpio.
+# (|| true: under pipefail an empty match would otherwise end the installer silently.)
 GPIO_PKG="RPi.GPIO"
-GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1)
+GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1 || true)
 GPIO_CHIP_NUM=${GPIO_CHIP#gpiochip}
-if [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
-    echo "      Detected new-style GPIO chip ($GPIO_CHIP) — using rpi-lgpio"
+if [[ -z "$GPIO_CHIP" && -e /dev/gpiochip0 ]] \
+        || [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
+    echo "      Detected new-style GPIO (${GPIO_CHIP:-no sysfs GPIO class}) — using rpi-lgpio"
     GPIO_PKG="rpi-lgpio"
     # Remove pip-installed RPi.GPIO if present; it shadows rpi-lgpio and breaks edge detection
     pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
