@@ -49,7 +49,7 @@ mode is disabled.
 - Email alerts with cooldown/reminder throttling
 - Alert state persistence across reboots
 - Prometheus metrics export via node_exporter textfile collector
-- Hardware watchdog (Pi BCM2835)
+- Hardware watchdog (Pi BCM2835, petted by systemd; a frozen Pi resets after 60 s)
 - Daily summary emails
 - SIGHUP config reload (no restart needed for threshold changes)
 
@@ -387,7 +387,7 @@ python3 -m unittest discover -s tests -v
 
 ```
 solar-hydroponic-monitor/
-├── install.sh                    # One-command installer (12 steps)
+├── install.sh                    # One-command installer (13 steps)
 ├── config.json                   # All configuration (edit this, not the scripts)
 ├── credentials.env.example       # Email credentials template
 ├── monitor_common.py             # Shared: AlertManager, email, watchdog, config
@@ -406,7 +406,9 @@ solar-hydroponic-monitor/
 ├── systemd/
 │   ├── renogy.service
 │   ├── waterflow.service
-│   └── battery_shutdown.service  # Runs as root, critical-battery alert/halt
+│   ├── battery_shutdown.service  # Runs as root, critical-battery alert/halt
+│   ├── clean-shutdown-marker.service # Marks orderly shutdowns for the boot-reason metric
+│   └── watchdog.conf             # systemd hardware-watchdog drop-in
 ├── logrotate/
 │   ├── renogy
 │   └── waterflow
@@ -416,4 +418,5 @@ solar-hydroponic-monitor/
 /etc/solar-hydroponic/credentials.env   # Email credentials (root:serviceuser, mode 640)
 /var/lib/renogy/                         # Persistent alert + SOC estimator state across reboots
 /ramdisk/                                # tmpfs for *.prom metric files
+/etc/systemd/system.conf.d/watchdog.conf # Hardware watchdog (60 s)
 ```

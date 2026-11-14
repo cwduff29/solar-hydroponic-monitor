@@ -196,10 +196,14 @@ else
 fi
 
 # --- [6/13] Hardware watchdog ---
-echo "[6/13] Hardware watchdog — skipped (disabled by default)."
-echo "      The watchdog is off by default (watchdog.enabled=false in config.json)."
-echo "      To enable: set watchdog.enabled=true in config.json, then manually add"
-echo "        dtparam=watchdog=on to /boot/firmware/config.txt and reboot."
+echo "[6/13] Enabling the hardware watchdog (systemd)..."
+# systemd pets the BCM2835 watchdog, so a frozen Pi resets itself after 60 s.
+# The Pi kernel loads bcm2835_wdt without dtparam=watchdog=on.
+mkdir -p /etc/systemd/system.conf.d
+cp "$INSTALL_DIR/systemd/watchdog.conf" /etc/systemd/system.conf.d/watchdog.conf
+echo "      Installed /etc/systemd/system.conf.d/watchdog.conf (60 s runtime, 2 min reboot)."
+echo "      Takes effect at the next reboot."
+echo "      Keep watchdog.enabled=false in config.json: systemd owns /dev/watchdog."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
