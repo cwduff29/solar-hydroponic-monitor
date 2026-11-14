@@ -1,0 +1,6 @@
+[Unit]
+Description=WiFi self-heal check (radio cycle, USB re-auth, reboot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wifi-heal.sh

@@ -16,6 +16,9 @@ CREDS_FILE="$CREDS_DIR/credentials.env"
 INSTALL_LOCAL_PROMETHEUS="${INSTALL_LOCAL_PROMETHEUS:-0}"
 # Hosts allowed to reach node_exporter (:9100), and :9090 if local Prometheus is on.
 SCRAPE_HOSTS="${SCRAPE_HOSTS:-192.168.99.201 192.168.99.224}"
+# WiFi self-heal timer: cycles the radio, re-authorizes the USB dongle and, after
+# about 12 min without the gateway, reboots the Pi. INSTALL_WIFI_HEAL=0 skips it.
+INSTALL_WIFI_HEAL="${INSTALL_WIFI_HEAL:-1}"
 
 # Check root
 if [[ $EUID -ne 0 ]]; then
@@ -31,6 +34,7 @@ echo " Service user      : $SERVICE_USER"
 echo " Credentials file  : $CREDS_FILE"
 echo " Local Prometheus  : $([[ $INSTALL_LOCAL_PROMETHEUS == 1 ]] && echo yes || echo 'no (INSTALL_LOCAL_PROMETHEUS=1 to enable)')"
 echo " Scrape hosts      : $SCRAPE_HOSTS"
+echo " WiFi self-heal    : $([[ $INSTALL_WIFI_HEAL == 1 ]] && echo yes || echo 'no (INSTALL_WIFI_HEAL=0)')"
 echo "================================================="
 echo ""
 
@@ -321,6 +325,22 @@ systemctl daemon-reload
 systemctl enable renogy.service waterflow.service battery_shutdown.service
 systemctl enable --now clean-shutdown-marker.service
 echo "      Services enabled (renogy, waterflow, battery_shutdown, clean-shutdown-marker)."
+
+if [[ "$INSTALL_WIFI_HEAL" == "1" ]]; then
+    GW="${WIFI_HEAL_GATEWAY:-$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || true)}"
+    if [[ -z "$GW" ]]; then
+        echo "      wifi-heal skipped: no default gateway found (set WIFI_HEAL_GATEWAY=a.b.c.d)."
+    else
+        sed -e "s|__GW__|$GW|g" "$INSTALL_DIR/scripts/wifi-heal.sh" > /usr/local/bin/wifi-heal.sh
+        chmod 755 /usr/local/bin/wifi-heal.sh
+        cp "$INSTALL_DIR/systemd/wifi-heal.service" "$INSTALL_DIR/systemd/wifi-heal.timer" /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable --now wifi-heal.timer
+        echo "      wifi-heal.timer enabled (pings gateway $GW every 2 min)."
+    fi
+else
+    echo "      wifi-heal skipped (INSTALL_WIFI_HEAL=0)."
+fi
 
 # Only start if credentials have been filled in
 if grep -q 'your_' "$CREDS_FILE" 2>/dev/null; then

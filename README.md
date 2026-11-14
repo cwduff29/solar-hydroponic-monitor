@@ -51,6 +51,7 @@ mode is disabled.
 - Prometheus metrics export via node_exporter textfile collector
 - Hardware watchdog (Pi BCM2835, petted by systemd; a frozen Pi resets after 60 s)
 - Crash capture (ramoops): kernel errors before a freeze survive the watchdog reset
+- WiFi self-heal timer (radio cycle, USB re-auth, then reboot after ~12 min without the gateway; optional)
 - Daily summary emails
 - SIGHUP config reload (no restart needed for threshold changes)
 
@@ -92,6 +93,8 @@ Installer options (environment variables):
 |----------|---------|--------|
 | `INSTALL_LOCAL_PROMETHEUS` | `0` | `1` installs Prometheus on the Pi (port 9090). With `0`, an existing local Prometheus service is stopped and disabled. |
 | `SCRAPE_HOSTS` | `192.168.99.201 192.168.99.224` | Hosts allowed through ufw to port 9100 (and 9090 with local Prometheus). Older broad private-range rules are removed. |
+| `INSTALL_WIFI_HEAL` | `1` | Installs `wifi-heal.timer`: every 2 min it pings the gateway; while that fails it cycles the radio, re-authorizes the USB dongle and finally reboots the Pi (only after 10 min of uptime). `0` skips it. |
+| `WIFI_HEAL_GATEWAY` | default route | Address wifi-heal pings. |
 
 ```bash
 sudo INSTALL_LOCAL_PROMETHEUS=0 SCRAPE_HOSTS="192.168.99.201 192.168.99.224" bash install.sh
@@ -400,7 +403,8 @@ solar-hydroponic-monitor/
 ├── waterflow_enhanced_failsafe.py # Hydroponic system controller
 ├── scripts/
 │   ├── identify_sensors.py       # Map DS18B20 sensor IDs to locations
-│   └── test_hardware.py          # Interactive hardware wiring verification
+│   ├── test_hardware.py          # Interactive hardware wiring verification
+│   └── wifi-heal.sh              # WiFi self-heal check (installed to /usr/local/bin)
 ├── tests/                        # Unit tests (python3 -m unittest discover -s tests)
 ├── prometheus/
 │   └── prometheus.yml            # Optional local Prometheus scrape config
@@ -409,6 +413,8 @@ solar-hydroponic-monitor/
 │   ├── waterflow.service
 │   ├── battery_shutdown.service  # Runs as root, critical-battery alert/halt
 │   ├── clean-shutdown-marker.service # Marks orderly shutdowns for the boot-reason metric
+│   ├── wifi-heal.service         # One WiFi self-heal check
+│   ├── wifi-heal.timer           # Runs it every 2 min
 │   └── watchdog.conf             # systemd hardware-watchdog drop-in
 ├── sysctl/
 │   └── 99-zz-crash-capture.conf  # Console loglevel + hung-task timeout for crash capture
@@ -423,5 +429,6 @@ solar-hydroponic-monitor/
 /ramdisk/                                # tmpfs for *.prom metric files
 /etc/systemd/system.conf.d/watchdog.conf # Hardware watchdog (60 s)
 /etc/sysctl.d/99-zz-crash-capture.conf   # Crash-capture kernel settings
+/usr/local/bin/wifi-heal.sh              # WiFi self-heal (gateway filled in)
 /boot/firmware/config.txt                # + dtoverlay=ramoops (backup: config.txt.bak-install-YYYYMMDD)
 ```
