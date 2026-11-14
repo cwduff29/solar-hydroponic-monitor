@@ -195,7 +195,7 @@ else
     echo "        - 1-Wire"
 fi
 
-# --- [6/13] Hardware watchdog ---
+# --- [6/13] Hardware watchdog and crash capture ---
 echo "[6/13] Enabling the hardware watchdog (systemd)..."
 # systemd pets the BCM2835 watchdog, so a frozen Pi resets itself after 60 s.
 # The Pi kernel loads bcm2835_wdt without dtparam=watchdog=on.
@@ -204,6 +204,33 @@ cp "$INSTALL_DIR/systemd/watchdog.conf" /etc/systemd/system.conf.d/watchdog.conf
 echo "      Installed /etc/systemd/system.conf.d/watchdog.conf (60 s runtime, 2 min reboot)."
 echo "      Takes effect at the next reboot."
 echo "      Keep watchdog.enabled=false in config.json: systemd owns /dev/watchdog."
+
+# Crash capture: ramoops keeps the kernel console in RAM across a watchdog
+# reset, and systemd-pstore saves it to /var/lib/systemd/pstore at the next boot.
+echo "      Enabling crash capture (ramoops)..."
+BOOT_CONFIG=/boot/firmware/config.txt
+[[ -f $BOOT_CONFIG ]] || BOOT_CONFIG=/boot/config.txt
+RAMOOPS_LINE='dtoverlay=ramoops,total-size=0x20000,record-size=0x4000,console-size=0x8000'
+if [[ ! -f $BOOT_CONFIG ]]; then
+    echo "      config.txt not found. Add this line under [all] manually:"
+    echo "        $RAMOOPS_LINE"
+elif grep -q '^dtoverlay=ramoops' "$BOOT_CONFIG"; then
+    echo "      ramoops overlay already in $BOOT_CONFIG."
+else
+    cp -p "$BOOT_CONFIG" "$BOOT_CONFIG.bak-install-$(date +%Y%m%d)"
+    # The overlay must apply to every board, so it goes in an [all] section.
+    if [[ "$(grep -E '^\[' "$BOOT_CONFIG" | tail -1 || true)" != "[all]" ]]; then
+        echo "[all]" >> "$BOOT_CONFIG"
+    fi
+    {
+        echo "# Keep kernel crash/console logs across a watchdog reset (see /var/lib/systemd/pstore)"
+        echo "$RAMOOPS_LINE"
+    } >> "$BOOT_CONFIG"
+    echo "      Added the ramoops overlay to $BOOT_CONFIG (backup: $BOOT_CONFIG.bak-install-$(date +%Y%m%d))."
+fi
+cp "$INSTALL_DIR/sysctl/99-zz-crash-capture.conf" /etc/sysctl.d/99-zz-crash-capture.conf
+sysctl -q -p /etc/sysctl.d/99-zz-crash-capture.conf
+echo "      Installed /etc/sysctl.d/99-zz-crash-capture.conf (kernel errors reach ramoops)."
 
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."

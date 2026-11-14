@@ -50,6 +50,7 @@ mode is disabled.
 - Alert state persistence across reboots
 - Prometheus metrics export via node_exporter textfile collector
 - Hardware watchdog (Pi BCM2835, petted by systemd; a frozen Pi resets after 60 s)
+- Crash capture (ramoops): kernel errors before a freeze survive the watchdog reset
 - Daily summary emails
 - SIGHUP config reload (no restart needed for threshold changes)
 
@@ -409,6 +410,8 @@ solar-hydroponic-monitor/
 │   ├── battery_shutdown.service  # Runs as root, critical-battery alert/halt
 │   ├── clean-shutdown-marker.service # Marks orderly shutdowns for the boot-reason metric
 │   └── watchdog.conf             # systemd hardware-watchdog drop-in
+├── sysctl/
+│   └── 99-zz-crash-capture.conf  # Console loglevel + hung-task timeout for crash capture
 ├── logrotate/
 │   ├── renogy
 │   └── waterflow
@@ -419,4 +422,6 @@ solar-hydroponic-monitor/
 /var/lib/renogy/                         # Persistent alert + SOC estimator state across reboots
 /ramdisk/                                # tmpfs for *.prom metric files
 /etc/systemd/system.conf.d/watchdog.conf # Hardware watchdog (60 s)
+/etc/sysctl.d/99-zz-crash-capture.conf   # Crash-capture kernel settings
+/boot/firmware/config.txt                # + dtoverlay=ramoops (backup: config.txt.bak-install-YYYYMMDD)
 ```
