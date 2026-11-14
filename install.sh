@@ -199,6 +199,13 @@ else
     echo "        - 1-Wire"
 fi
 
+# MediaTek MT76 USB WiFi dongle (vendor 0e8d, e.g. Panda PAU0B / MT7610U):
+# turn off USB scatter-gather, which stalls on the Pi Zero's USB controller.
+if grep -qs '^mt76_usb ' /proc/modules || grep -qsx '0e8d' /sys/bus/usb/devices/*/idVendor; then
+    cp "$INSTALL_DIR/modprobe/mt76-usb.conf" /etc/modprobe.d/mt76-usb.conf
+    echo "      MT76 USB WiFi found: installed /etc/modprobe.d/mt76-usb.conf (disable_usb_sg=1, after reboot)."
+fi
+
 # --- [6/13] Hardware watchdog and crash capture ---
 echo "[6/13] Enabling the hardware watchdog (systemd)..."
 # systemd pets the BCM2835 watchdog, so a frozen Pi resets itself after 60 s.

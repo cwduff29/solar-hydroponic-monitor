@@ -416,6 +416,8 @@ solar-hydroponic-monitor/
 │   ├── wifi-heal.service         # One WiFi self-heal check
 │   ├── wifi-heal.timer           # Runs it every 2 min
 │   └── watchdog.conf             # systemd hardware-watchdog drop-in
+├── modprobe/
+│   └── mt76-usb.conf             # MT76 USB WiFi: disable USB scatter-gather (installed if present)
 ├── sysctl/
 │   └── 99-zz-crash-capture.conf  # Console loglevel + hung-task timeout for crash capture
 ├── logrotate/
@@ -430,5 +432,6 @@ solar-hydroponic-monitor/
 /etc/systemd/system.conf.d/watchdog.conf # Hardware watchdog (60 s)
 /etc/sysctl.d/99-zz-crash-capture.conf   # Crash-capture kernel settings
 /usr/local/bin/wifi-heal.sh              # WiFi self-heal (gateway filled in)
+/etc/modprobe.d/mt76-usb.conf            # Only with a MediaTek MT76 USB WiFi dongle
 /boot/firmware/config.txt                # + dtoverlay=ramoops (backup: config.txt.bak-install-YYYYMMDD)
 ```
