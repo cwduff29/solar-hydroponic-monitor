@@ -39,6 +39,25 @@ echo " WiFi self-heal    : $([[ $INSTALL_WIFI_HEAL == 1 ]] && echo yes || echo '
 echo "================================================="
 echo ""
 
+# Install apt packages only if they are missing. Any "apt-get install" first
+# resumes packages that were left half-configured (for example an interrupted
+# kernel upgrade), and on a Pi Zero that can mean hours of DKMS module builds
+# while the pumps are running. So apt must not be called when there is nothing
+# to install.
+apt_install_missing() {
+    local pkg missing=()
+    for pkg in "$@"; do
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+            missing+=("$pkg")
+        fi
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "      Already installed: $* (apt not run)"
+        return 0
+    fi
+    apt-get install -y "${missing[@]}"
+}
+
 # --- [0/13] Preflight dependency check ---
 echo "[0/13] Checking system dependencies..."
 
@@ -107,7 +126,7 @@ echo "      Done."
 
 # --- [2/13] Prometheus node_exporter ---
 echo "[2/13] Installing Prometheus node_exporter..."
-apt-get install -y prometheus-node-exporter
+apt_install_missing prometheus-node-exporter
 
 # Override service to add textfile collector pointing at /ramdisk.
 # Off to keep the Pi Zero's scrape cheap: systemd and processes (CPU), and
@@ -135,7 +154,7 @@ echo "      Metrics endpoint   : http://$(hostname -I | awk '{print $1}'):9100/m
 # --- [3/13] Prometheus (optional) ---
 if [[ "$INSTALL_LOCAL_PROMETHEUS" == "1" ]]; then
     echo "[3/13] Installing local Prometheus..."
-    apt-get install -y prometheus
+    apt_install_missing prometheus
 
     # Install our scrape config
     mkdir -p /etc/prometheus
