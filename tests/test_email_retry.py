@@ -49,6 +49,12 @@ class FakeSMTP:
 
 
 class TestEmailRetry(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Building the TLS context loads the CA bundle (seconds on a Pi Zero);
+        # do it before the tests that time the retry queue.
+        mc._smtp_tls_context()
+
     def setUp(self):
         FakeSMTP.script, FakeSMTP.sent, FakeSMTP.calls = [], [], []
         FakeSMTP.tls_contexts = []
@@ -80,6 +86,12 @@ class TestEmailRetry(unittest.TestCase):
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(ctx.check_hostname)
+
+    def test_tls_context_is_built_once(self):
+        self.assertTrue(mc.send_email('one', 'b'))
+        self.assertTrue(mc.send_email('two', 'b'))
+        first, second = FakeSMTP.tls_contexts
+        self.assertIs(first, second)
 
     def test_smtp_has_timeout(self):
         self.assertTrue(mc.send_email('s', 'b'))

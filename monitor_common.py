@@ -144,6 +144,21 @@ def send_email(subject, body, disabled=False):
         return False
 
 
+_tls_context = None
+
+
+def _smtp_tls_context():
+    """Verifying TLS context for SMTP, built once per process.
+
+    Loading the CA bundle takes about 2.5 s on a Pi Zero: too long to repeat
+    for every email sent from the pump control loop.
+    """
+    global _tls_context
+    if _tls_context is None:
+        _tls_context = ssl.create_default_context()
+    return _tls_context
+
+
 def _deliver_email(subject, body):
     """Send one message; raises on failure."""
     smtp_user = os.environ.get('SMTP_USER', '')
@@ -156,7 +171,7 @@ def _deliver_email(subject, body):
                       int(os.environ.get('SMTP_PORT', '587')),
                       timeout=get_config('alerts.smtp_timeout_seconds', 20)) as server:
         # Without a context smtplib does not verify the server certificate
-        server.starttls(context=ssl.create_default_context())
+        server.starttls(context=_smtp_tls_context())
         server.login(smtp_user, os.environ.get('SMTP_PASSWORD', ''))
         server.send_message(msg)
 
