@@ -101,6 +101,7 @@ class TestWaterflowIntegration(unittest.TestCase):
         self.clock = [1_000_000.0]
         patches = [
             mock.patch.object(w.time, 'time', lambda: self.clock[0]),
+            mock.patch.object(w, '_now', lambda: self.clock[0]),
             mock.patch.object(w, 'read_battery_soc', lambda: 12.0),
             mock.patch.object(w, 'battery_soc_confidence', 0.9),
             mock.patch.object(w, 'last_water_temp_c', 18.0),

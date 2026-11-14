@@ -51,6 +51,7 @@ def import_waterflow():
         'paths.waterflow_prom_tmp': f'{tmp}/waterflow.prom.tmp',
         'paths.waterflow_alert_state': f'{tmp}/alerts.json',
         'paths.waterflow_persistent_state': f'{tmp}/state/waterflow_state.json',
+        'paths.waterflow_pump_state': f'{tmp}/state/waterflow_pump_state.json',
         'paths.battery_data_file': f'{tmp}/Renogy.prom',
         'watchdog.enabled': False,
     }

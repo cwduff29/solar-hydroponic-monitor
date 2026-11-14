@@ -51,7 +51,7 @@ mode is disabled.
 - Prometheus metrics export via node_exporter textfile collector
 - Hardware watchdog (Pi BCM2835, petted by systemd; a frozen Pi resets after 60 s)
 - Crash capture (ramoops): kernel errors before a freeze survive the watchdog reset
-- WiFi self-heal timer (radio cycle, USB re-auth, then reboot after ~12 min without the gateway; optional)
+- WiFi self-heal timer (radio cycle, USB re-auth, then reboot after ~12 min without the gateway, at most 3 reboots in a row; optional)
 - Daily summary emails
 - SIGHUP config reload (no restart needed for threshold changes)
 
@@ -93,8 +93,8 @@ Installer options (environment variables):
 |----------|---------|--------|
 | `INSTALL_LOCAL_PROMETHEUS` | `0` | `1` installs Prometheus on the Pi (port 9090). With `0`, an existing local Prometheus service is stopped and disabled. |
 | `SCRAPE_HOSTS` | `192.168.99.201 192.168.99.224` | Hosts allowed through ufw to port 9100 (and 9090 with local Prometheus). Older broad private-range rules are removed. |
-| `INSTALL_WIFI_HEAL` | `1` | Installs `wifi-heal.timer`: every 2 min it pings the gateway; while that fails it cycles the radio, re-authorizes the USB dongle and finally reboots the Pi (only after 10 min of uptime). `0` skips it. |
-| `WIFI_HEAL_GATEWAY` | default route | Address wifi-heal pings. |
+| `INSTALL_WIFI_HEAL` | `1` | Installs `wifi-heal.timer`: every 2 min it pings the gateway; while that fails it cycles the radio, re-authorizes the USB dongle and finally reboots the Pi (only after 10 min of uptime). After 3 reboots in a row that did not bring the gateway back it stops rebooting (the router is down, not the Pi) and retries the radio and USB steps every 30 min until the gateway answers. `0` skips it. |
+| `WIFI_HEAL_GATEWAY` | default route | Fallback address for wifi-heal. It pings the current default gateway on `wlan0`, or the last one it saw (kept in `/var/lib/wifi-heal/`) while WiFi is down. |
 
 ```bash
 sudo INSTALL_LOCAL_PROMETHEUS=0 SCRAPE_HOSTS="192.168.99.201 192.168.99.224" bash install.sh
@@ -142,6 +142,16 @@ sudo kill -HUP $(systemctl show -p MainPID --value renogy)
 sudo kill -HUP $(systemctl show -p MainPID --value waterflow)
 ```
 
+A reload applies thresholds, timing, flow settings (`waterflow.flow`) and the maintenance flags.
+GPIO pins, relay wiring, the PWM pump settings, file paths and the Renogy serial/poll settings
+are read once at startup and need a service restart.
+
+If `config.json` is invalid when you reload, the service logs the error and keeps running on the
+previous values. If it is missing or invalid when a service **starts**, the service exits instead
+of running on built-in defaults (which do not match this hardware) and systemd retries every
+10 s; `journalctl -u waterflow` shows the parse error. Check an edit before restarting with
+`python3 -m json.tool config.json > /dev/null`.
+
 Key sections:
 
 | Section | Contents |
@@ -187,6 +197,11 @@ The Renogy load-terminal **LVD/LVR** is the real battery protection: it cuts eve
 including the backup pump. Recommended settings for this 50 Ah LiFePO4 pack: LVD ≈ 11.8 V
 (with the controller's delay), LVR ≈ 12.9 V, under-voltage warning ≈ 12.2 V. A low LVR lets the
 load back on with an almost empty battery. The BMS (10.0 V) is the last resort.
+
+`battery_shutdown.service` runs as root from a root-owned copy of the script in
+`/usr/local/lib/solar-hydroponic/`, so re-run `sudo bash install.sh` after changing
+`battery_shutdown.py`. Its settings are still read from `config.json` in the install directory
+(reload with SIGHUP).
 
 `battery_shutdown.py` (`shutdown.mode`):
 - `alert` (default): when estimated SOC ≤ `critical_soc_pct`, estimator confidence ≥
@@ -319,7 +334,7 @@ replace that UID as above if yours differs.
 # Status
 sudo systemctl status renogy waterflow battery_shutdown prometheus-node-exporter
 
-# Live logs
+# Live logs (warnings and errors are also written to /var/log/renogy.log and /var/log/waterflow.log)
 sudo journalctl -u renogy -f
 sudo journalctl -u waterflow -f
 
@@ -338,17 +353,20 @@ sudo systemctl restart renogy waterflow
 
 ## Maintenance Mode
 
-Disable specific subsystems by editing `config.json` and sending SIGHUP. The disable flags are in each script's top-level config section and are reflected as Prometheus metrics so you can see maintenance mode status in Grafana.
+Disable specific subsystems by editing `config.json` and sending SIGHUP to the service that owns the flag. Each service logs which flags are on after a reload (`journalctl -u waterflow | grep "maintenance flags"`) and exports them as Prometheus metrics, so maintenance mode is visible in Grafana.
 
 Common scenarios:
 
-| Scenario | Flags to set |
-|----------|-------------|
-| Reservoir empty / refilling | `disable_flow_alerts`, `disable_pump_testing` |
-| Aerator servicing | `disable_aerator` |
-| Fan servicing | `disable_fan` |
-| Battery maintenance | `disable_low_battery_alerts`, `disable_capacity_alerts` |
-| Testing (no emails) | `disable_emails` |
+| Scenario | Section | Flags to set | Reload |
+|----------|---------|--------------|--------|
+| Reservoir empty / refilling | `waterflow.maintenance` | `disable_flow_alerts`, `disable_pump_testing` | waterflow |
+| Aerator servicing | `waterflow.maintenance` | `disable_aerator` | waterflow |
+| Fan servicing | `waterflow.maintenance` | `disable_fan` | waterflow |
+| Battery maintenance | `renogy.maintenance` | `disable_low_battery_alerts`, `disable_capacity_alerts` | renogy |
+| Controller servicing | `renogy.maintenance` | `disable_fault_alerts`, `disable_temperature_alerts` | renogy |
+| Testing (no emails) | both | `disable_emails` | both |
+
+`disable_flow_alerts` also stops automatic pump recovery and failover, because those are triggered by the low-flow check.
 
 ## Hardware Setup Scripts
 
@@ -394,6 +412,7 @@ solar-hydroponic-monitor/
 ├── install.sh                    # One-command installer (13 steps)
 ├── config.json                   # All configuration (edit this, not the scripts)
 ├── credentials.env.example       # Email credentials template
+├── requirements.txt              # Pinned Python packages (installed by install.sh)
 ├── monitor_common.py             # Shared: AlertManager, email, watchdog, config
 ├── renogy.py                     # Renogy charge controller monitor
 ├── renogy_extended.py            # Renogy Modbus driver with batch reads
@@ -411,7 +430,7 @@ solar-hydroponic-monitor/
 ├── systemd/
 │   ├── renogy.service
 │   ├── waterflow.service
-│   ├── battery_shutdown.service  # Runs as root, critical-battery alert/halt
+│   ├── battery_shutdown.service  # Runs as root from a root-owned copy of battery_shutdown.py
 │   ├── clean-shutdown-marker.service # Marks orderly shutdowns for the boot-reason metric
 │   ├── wifi-heal.service         # One WiFi self-heal check
 │   ├── wifi-heal.timer           # Runs it every 2 min
@@ -427,11 +446,13 @@ solar-hydroponic-monitor/
 
 # Created by install.sh (not in repo):
 /etc/solar-hydroponic/credentials.env   # Email credentials (root:serviceuser, mode 640)
-/var/lib/renogy/                         # Persistent alert + SOC estimator state across reboots
+/var/lib/renogy/                         # Persistent alert, SOC estimator and pump (failover / last test) state across reboots
 /ramdisk/                                # tmpfs for *.prom metric files
 /etc/systemd/system.conf.d/watchdog.conf # Hardware watchdog (60 s)
 /etc/sysctl.d/99-zz-crash-capture.conf   # Crash-capture kernel settings
-/usr/local/bin/wifi-heal.sh              # WiFi self-heal (gateway filled in)
+/usr/local/bin/wifi-heal.sh              # WiFi self-heal (fallback gateway filled in)
+/var/lib/wifi-heal/                      # wifi-heal: last gateway seen, reboots in a row
+/usr/local/lib/solar-hydroponic/battery_shutdown.py  # Root-owned copy run by battery_shutdown.service
 /etc/modprobe.d/mt76-usb.conf            # Only with a MediaTek MT76 USB WiFi dongle
 /boot/firmware/config.txt                # + dtoverlay=ramoops (backup: config.txt.bak-install-YYYYMMDD)
 ```

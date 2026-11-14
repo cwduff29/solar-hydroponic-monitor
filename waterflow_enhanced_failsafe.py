@@ -57,19 +57,15 @@ from monitor_common import (
 # ============================================================================
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.json')
-load_config(_CONFIG_PATH)
+load_config(_CONFIG_PATH, required=True)
 validate_config()
 
 # ============================================================================
 # MAINTENANCE CONTROLS - INDIVIDUAL SUBSYSTEM DISABLE FLAGS
 # ============================================================================
-# Set any of these to True to disable specific functions during maintenance:
-
-DISABLE_EMAILS       = get_config('waterflow.maintenance.disable_emails',       False)
-DISABLE_PUMP_TESTING = get_config('waterflow.maintenance.disable_pump_testing',  False)
-DISABLE_FLOW_ALERTS  = get_config('waterflow.maintenance.disable_flow_alerts',   False)
-DISABLE_AERATOR      = get_config('waterflow.maintenance.disable_aerator',       False)
-DISABLE_FAN          = get_config('waterflow.maintenance.disable_fan',           False)
+# DISABLE_EMAILS, DISABLE_PUMP_TESTING, DISABLE_FLOW_ALERTS, DISABLE_AERATOR and
+# DISABLE_FAN come from waterflow.maintenance in config.json. They are loaded in
+# _load_thresholds() below, so a SIGHUP applies a change without a restart.
 # ============================================================================
 
 # ============================================================================
@@ -92,25 +88,18 @@ FAN_CONTROL_GPIO        = get_config('waterflow.gpio.fan_control',        25)
 
 # Brushless PWM Configuration for main pump (MOSFET switch module)
 # Single PWM GPIO drives the MOSFET gate; the motor handles its own commutation.
-MAIN_PUMP_PWM_ENABLED  = get_config('waterflow.main_pump_brushless_pwm.enabled',              False)
+MAIN_PUMP_PWM_ENABLED  = get_config('waterflow.main_pump_brushless_pwm.enabled',              True)
 MAIN_PUMP_PWM_GPIO     = get_config('waterflow.main_pump_brushless_pwm.pwm_gpio',             12)
 MAIN_PUMP_PWM_FREQ     = get_config('waterflow.main_pump_brushless_pwm.frequency_hz',         1000)
-MAIN_PUMP_DEFAULT_DUTY = get_config('waterflow.main_pump_brushless_pwm.default_duty_cycle_pct', 100)
-MAIN_PUMP_MIN_DUTY     = get_config('waterflow.main_pump_brushless_pwm.min_duty_cycle_pct',   0)
+MAIN_PUMP_DEFAULT_DUTY = get_config('waterflow.main_pump_brushless_pwm.default_duty_cycle_pct', 70)
+MAIN_PUMP_MIN_DUTY     = get_config('waterflow.main_pump_brushless_pwm.min_duty_cycle_pct',   50)
 
-# Flow Sensor Configuration
-FLOW_CALIBRATION_FACTOR  = get_config('waterflow.flow.calibration_factor',           7.5)
-FLOW_MEASUREMENT_DURATION = get_config('waterflow.flow.measurement_duration_seconds', 10)
-MIN_FLOW_THRESHOLD       = get_config('waterflow.flow.min_flow_threshold_lpm',        0.25)
-FLOW_WARNING_DELAY       = get_config('waterflow.flow.warning_delay_seconds',         600)
-FLOW_IMBALANCE_THRESHOLD = get_config('waterflow.flow.imbalance_threshold_lpm',       0.5)
-FLOW_IMBALANCE_PCT       = get_config('waterflow.flow.imbalance_threshold_pct',        30)
-FLOW_IMBALANCE_DURATION  = get_config('waterflow.flow.imbalance_duration_seconds',    600)
-FLOW_HISTORY_SIZE        = get_config('waterflow.flow.history_size',                  5)
-AERATOR_FLOW_SUPPRESS    = get_config('waterflow.flow.aerator_flow_suppress_seconds',  30)
+# Flow sensor settings (waterflow.flow) are loaded in _load_thresholds() below.
 
 # Main Loop Timing
 MAIN_LOOP_INTERVAL = 1  # seconds (non-blocking architecture)
+ENV_INTERVAL = 30       # seconds between sensor reads / fan control / temperature alerts
+PROM_INTERVAL = 10      # seconds between Prometheus file writes
 
 # Temperature Sensor Paths
 DS18B20_BASE_DIR    = '/sys/bus/w1/devices/'
@@ -143,8 +132,8 @@ def _load_thresholds():
     global FAN_TEMP_ON_C, FAN_TEMP_OFF_C, FAN_TEMP_FORCE_ON_C
     global FAN_HUMIDITY_ON, FAN_HUMIDITY_OFF, FAN_MIN_TOGGLE_INTERVAL
     global SMART_COOLING_MIN_C, SMART_HEATING_MAX_C
-    global HUMIDITY_WARNING, HUMIDITY_CRITICAL, HUMIDITY_EMERGENCY
-    global BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE, BATTERY_THRESHOLD_NORMAL
+    global HUMIDITY_WARNING, HUMIDITY_EMERGENCY
+    global BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE
     global BATTERY_TIER_HYSTERESIS, MAIN_PUMP_LOW_SOC_CFG
     global BATTERY_SKIP_PUMP_TEST_BELOW
     global AERATION_ON_DURATION, AERATION_OFF_DURATION
@@ -162,7 +151,29 @@ def _load_thresholds():
     global MAX_HUMIDITY_PCT, MIN_HUMIDITY_PCT
     global MAX_PRESSURE_HPA, MIN_PRESSURE_HPA
     global MAX_FLOW_LPM, MAX_SPIKE_MULTIPLIER
-    global FLOW_IMBALANCE_PCT
+    global FLOW_IMBALANCE_PCT, FLOW_IMBALANCE_THRESHOLD, FLOW_IMBALANCE_DURATION
+    global FLOW_CALIBRATION_FACTOR, FLOW_MEASUREMENT_DURATION, MIN_FLOW_THRESHOLD
+    global FLOW_WARNING_DELAY, FLOW_HISTORY_SIZE, AERATOR_FLOW_SUPPRESS, FLOW_TREND_DROP_PCT
+    global DISABLE_EMAILS, DISABLE_PUMP_TESTING, DISABLE_FLOW_ALERTS, DISABLE_AERATOR, DISABLE_FAN
+
+    # Maintenance flags
+    DISABLE_EMAILS       = bool(get_config('waterflow.maintenance.disable_emails',       False))
+    DISABLE_PUMP_TESTING = bool(get_config('waterflow.maintenance.disable_pump_testing', False))
+    DISABLE_FLOW_ALERTS  = bool(get_config('waterflow.maintenance.disable_flow_alerts',  False))
+    DISABLE_AERATOR      = bool(get_config('waterflow.maintenance.disable_aerator',      False))
+    DISABLE_FAN          = bool(get_config('waterflow.maintenance.disable_fan',          False))
+
+    # Flow sensor
+    FLOW_CALIBRATION_FACTOR   = get_config('waterflow.flow.calibration_factor',            7.5)
+    FLOW_MEASUREMENT_DURATION = get_config('waterflow.flow.measurement_duration_seconds',  10)
+    MIN_FLOW_THRESHOLD        = get_config('waterflow.flow.min_flow_threshold_lpm',        0.25)
+    FLOW_WARNING_DELAY        = get_config('waterflow.flow.warning_delay_seconds',         600)
+    FLOW_IMBALANCE_THRESHOLD  = get_config('waterflow.flow.imbalance_threshold_lpm',       0.8)
+    FLOW_IMBALANCE_PCT        = get_config('waterflow.flow.imbalance_threshold_pct',       65)
+    FLOW_IMBALANCE_DURATION   = get_config('waterflow.flow.imbalance_duration_seconds',    1800)
+    FLOW_HISTORY_SIZE         = get_config('waterflow.flow.history_size',                  5)
+    AERATOR_FLOW_SUPPRESS     = get_config('waterflow.flow.aerator_flow_suppress_seconds', 30)
+    FLOW_TREND_DROP_PCT       = get_config('waterflow.flow.trend_drop_pct',                0.20)
 
     # Temperature thresholds (all in degC internally)
     NFT_RETURN_EXTREME_TEMP_C             = get_config('waterflow.temperature.nft_extreme_temp_c',                29.4)
@@ -176,9 +187,9 @@ def _load_thresholds():
     WATER_TEMP_MODERATE_C                 = get_config('waterflow.temperature.water_temp_moderate_c',             20.0)
 
     # Fan thresholds (degC)
-    FAN_TEMP_ON_C         = get_config('waterflow.fan.temp_on_c',                 35.0)
-    FAN_TEMP_OFF_C        = get_config('waterflow.fan.temp_off_c',                29.4)
-    FAN_TEMP_FORCE_ON_C   = get_config('waterflow.fan.temp_force_on_c',           43.3)
+    FAN_TEMP_ON_C         = get_config('waterflow.fan.temp_on_c',                 26.7)
+    FAN_TEMP_OFF_C        = get_config('waterflow.fan.temp_off_c',                23.9)
+    FAN_TEMP_FORCE_ON_C   = get_config('waterflow.fan.temp_force_on_c',           35.0)
     FAN_HUMIDITY_ON       = get_config('waterflow.fan.humidity_on_pct',            80)
     FAN_HUMIDITY_OFF      = get_config('waterflow.fan.humidity_off_pct',           70)
     FAN_MIN_TOGGLE_INTERVAL = get_config('waterflow.fan.min_toggle_interval_seconds', 120)
@@ -187,13 +198,11 @@ def _load_thresholds():
 
     # Humidity alerts
     HUMIDITY_WARNING  = get_config('waterflow.humidity_alerts.warning_pct',   80)
-    HUMIDITY_CRITICAL = get_config('waterflow.humidity_alerts.critical_pct',  85)
     HUMIDITY_EMERGENCY = get_config('waterflow.humidity_alerts.emergency_pct', 90)
 
     # Battery load shedding
     BATTERY_THRESHOLD_DISABLE      = get_config('waterflow.battery_load_shedding.disable_threshold_pct', 30)
     BATTERY_THRESHOLD_REDUCE       = get_config('waterflow.battery_load_shedding.reduce_threshold_pct',  50)
-    BATTERY_THRESHOLD_NORMAL       = get_config('waterflow.battery_load_shedding.normal_threshold_pct',  70)
     BATTERY_SKIP_PUMP_TEST_BELOW   = get_config('waterflow.battery_load_shedding.skip_pump_test_below_pct', 50)
     BATTERY_TIER_HYSTERESIS        = get_config('waterflow.battery_load_shedding.tier_hysteresis_pct', 2)
 
@@ -233,20 +242,18 @@ def _load_thresholds():
     EMAIL_REMINDER_HOURS   = get_config('alerts.email_reminder_hours',   12)
 
     # Sensor validation bounds
-    MAX_TEMP_C           = get_config('waterflow.thresholds.max_temp_c',           80.0)
-    MIN_TEMP_C           = get_config('waterflow.thresholds.min_temp_c',          -40.0)
-    MAX_HUMIDITY_PCT     = get_config('waterflow.thresholds.max_humidity_pct',    100.0)
+    MAX_TEMP_C           = get_config('waterflow.thresholds.max_temp_c',           60.0)
+    MIN_TEMP_C           = get_config('waterflow.thresholds.min_temp_c',          -20.0)
+    MAX_HUMIDITY_PCT     = get_config('waterflow.thresholds.max_humidity_pct',    95.0)
     MIN_HUMIDITY_PCT     = get_config('waterflow.thresholds.min_humidity_pct',      0.0)
     MAX_PRESSURE_HPA     = get_config('waterflow.thresholds.max_pressure_hpa',   1084.0)
     MIN_PRESSURE_HPA     = get_config('waterflow.thresholds.min_pressure_hpa',    870.0)
-    MAX_FLOW_LPM         = get_config('waterflow.thresholds.max_flow_lpm',         10.0)
+    MAX_FLOW_LPM         = get_config('waterflow.thresholds.max_flow_lpm',         30.0)
     MAX_SPIKE_MULTIPLIER = get_config('waterflow.thresholds.max_spike_multiplier',  5.0)
-
-    FLOW_IMBALANCE_PCT   = get_config('waterflow.flow.imbalance_threshold_pct',     30)
 
     # Closed-loop flow rate control (0 = disabled)
     MAIN_PUMP_TARGET_FLOW    = get_config('waterflow.main_pump_brushless_pwm.target_flow_lpm',    0.0)
-    MAIN_PUMP_FLOW_KP        = get_config('waterflow.main_pump_brushless_pwm.flow_control_kp',    5.0)
+    MAIN_PUMP_FLOW_KP        = get_config('waterflow.main_pump_brushless_pwm.flow_control_kp',    1.0)
     MAIN_PUMP_FLOW_DEADBAND  = get_config('waterflow.main_pump_brushless_pwm.flow_deadband_lpm',  0.1)
     MAIN_PUMP_FLOW_MAX_STEP  = get_config('waterflow.main_pump_brushless_pwm.flow_max_step_pct',  2.0)
 
@@ -257,6 +264,9 @@ PROM_OUTPUT_FILE = get_config('paths.waterflow_prom',        '/ramdisk/waterflow
 PROM_TEMP_FILE   = get_config('paths.waterflow_prom_tmp',    '/ramdisk/waterflow.prom.tmp')
 STATE_FILE       = get_config('paths.waterflow_alert_state', '/ramdisk/waterflow_alerts.json')
 PERSISTENT_STATE_FILE = get_config('paths.waterflow_persistent_state', '/var/lib/renogy/waterflow_state.json')
+# Failover flag and last pump test time. Separate from the two alert-state files
+# above (AlertManager owns those) and on persistent storage so it survives a reboot.
+PUMP_STATE_FILE  = get_config('paths.waterflow_pump_state',  '/var/lib/renogy/waterflow_pump_state.json')
 LOG_FILE_PATH    = get_config('paths.waterflow_log',         '/var/log/waterflow.log')
 BOOT_REASON_STATE_FILE = get_config('paths.boot_reason_state', '/var/lib/renogy/boot_reasons.json')
 # Written by clean-shutdown-marker.service during an orderly shutdown (systemd/)
@@ -277,7 +287,11 @@ TEMP_DIFF_TRACKING_ENABLED = True  # Track in Prometheus for analysis
 # ============================================================================
 
 import logging
+# force=True: load_config()/validate_config() above already logged, which makes
+# logging install a default handler; without force this call would do nothing
+# and the log file would stay empty.
 logging.basicConfig(
+    force=True,
     level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
@@ -285,6 +299,34 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# ============================================================================
+# CLOCK
+# ============================================================================
+
+def _now():
+    """Monotonic seconds, for every interval and timer in this file.
+
+    The Pi has no RTC: after a boot the wall clock is stale until NTP syncs and
+    then steps forward, which would cut timers short. time.time() is used only
+    for timestamps that are stored or exported (and for file mtimes).
+    """
+    return time.monotonic()
+
+
+_log_last = {}
+
+
+def _log_throttled(key, message, interval=300, level=logging.WARNING):
+    """Log message at most once per interval seconds for this key. The main
+    loop runs every second, so a condition that persists must not log (and
+    write to the SD card) on every pass."""
+    now = _now()
+    last = _log_last.get(key)
+    if last is None or now - last >= interval:
+        _log_last[key] = now
+        logging.log(level, message)
+
 
 # ============================================================================
 # RELAY CONTROL HELPER FUNCTIONS
@@ -392,7 +434,7 @@ leak_alert_sent = False
 
 # Aeration state (start OFF, let control_aeration() turn it on based on schedule)
 aeration_state = False
-last_aeration_toggle = time.time()
+last_aeration_toggle = _now()
 aeration_mode = "normal"
 _aeration_soc_tier = None   # Track SOC tier to detect tier changes
 load_shed_tier = load_shedding.TIER_NORMAL   # 0 normal, 1 reduced, 2 disabled
@@ -408,7 +450,7 @@ _FLOW_ALERT_TYPES = ('low_flow', 'leak_detected', 'pump_recovery_failed',
 
 # Fan state (start OFF, let control_ventilation_fan() turn it on based on temperature)
 fan_running = False
-fan_last_toggle = time.time()
+fan_last_toggle = _now()
 
 # Battery state
 battery_soc = 100.0
@@ -623,17 +665,52 @@ def sync_alert_flags():
 # SIGHUP HANDLER
 # ============================================================================
 
+_reload_requested = False
+
+
 def _sighup_handler(signum, frame):
+    # Only set a flag. Reloading here would take the config lock, and the main
+    # thread this handler interrupts may already hold it (a deadlock that would
+    # freeze pump control). The main loop calls apply_pending_reload().
+    global _reload_requested
+    _reload_requested = True
+
+
+def apply_pending_reload():
+    """Reload config.json if a SIGHUP asked for it. Returns True if it reloaded."""
+    global _reload_requested
+    if not _reload_requested:
+        return False
+    _reload_requested = False
     logging.warning("SIGHUP received: reloading config")
-    if reload_config():
-        _load_thresholds()
-        alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
-        alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours',   12)
-        logging.warning("Config reloaded and thresholds updated")
-    else:
+    if not reload_config():
         logging.error("Config reload failed")
+        return False
+    _load_thresholds()
+    alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
+    alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours',   12)
+    logging.warning(
+        f"Config reloaded and thresholds updated "
+        f"(maintenance flags on: {', '.join(_maintenance_flags()) or 'none'})")
+    return True
 
 signal.signal(signal.SIGHUP, _sighup_handler)
+
+
+def _sigterm_handler(signum, frame):
+    # systemd stop: unwind through main()'s finally, which saves the pump and
+    # alert state and releases the GPIO lines (pumps go to their fail-safe state).
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+
+
+def _maintenance_flags():
+    """Names of the maintenance flags that are currently on."""
+    flags = (('EMAILS', DISABLE_EMAILS), ('PUMP TESTING', DISABLE_PUMP_TESTING),
+             ('FLOW ALERTS', DISABLE_FLOW_ALERTS), ('AERATOR', DISABLE_AERATOR),
+             ('FAN', DISABLE_FAN))
+    return [name for name, on in flags if on]
 
 # ============================================================================
 # EMAIL HELPER
@@ -715,9 +792,9 @@ def countPulse_inlet(channel):
     """Interrupt handler for inlet flow sensor — counts only pulses with LOW width >= PULSE_MIN_WIDTH_S"""
     global count_inlet, _inlet_falling_time
     if GPIO.input(channel) == GPIO.LOW:
-        _inlet_falling_time = time.time()
+        _inlet_falling_time = _now()
     else:
-        t = time.time()
+        t = _now()
         if _inlet_falling_time > 0 and (t - _inlet_falling_time) >= PULSE_MIN_WIDTH_S:
             with _flow_lock:
                 if flow_measurement_active:
@@ -729,9 +806,9 @@ def countPulse_outlet(channel):
     """Interrupt handler for outlet flow sensor — counts only pulses with LOW width >= PULSE_MIN_WIDTH_S"""
     global count_outlet, _outlet_falling_time
     if GPIO.input(channel) == GPIO.LOW:
-        _outlet_falling_time = time.time()
+        _outlet_falling_time = _now()
     else:
-        t = time.time()
+        t = _now()
         if _outlet_falling_time > 0 and (t - _outlet_falling_time) >= PULSE_MIN_WIDTH_S:
             with _flow_lock:
                 if flow_measurement_active:
@@ -750,22 +827,33 @@ def start_flow_measurement():
         count_inlet = 0
         count_outlet = 0
         flow_measurement_active = True
-    flow_measurement_start_time = time.time()
+        flow_measurement_start_time = _now()
+
+
+def stop_flow_measurement():
+    """Stop counting and return (inlet_pulses, outlet_pulses, elapsed_seconds).
+
+    elapsed_seconds is the measured length of the window. The main loop does
+    not wake exactly on time, so dividing by the nominal duration over-reads.
+    """
+    global flow_measurement_active
+    with _flow_lock:
+        flow_measurement_active = False
+        start = flow_measurement_start_time
+        elapsed = _now() - start if start is not None else 0.0
+        return count_inlet, count_outlet, elapsed
 
 
 def check_flow_measurement():
-    """Check if flow measurement period is complete"""
-    global flow_measurement_active
-
+    """If the measurement period is complete, stop counting and return the
+    measured window length in seconds; otherwise return None."""
     if not flow_measurement_active:
-        return False
+        return None
 
-    if time.time() - flow_measurement_start_time >= FLOW_MEASUREMENT_DURATION:
-        with _flow_lock:
-            flow_measurement_active = False
-        return True
+    if _now() - flow_measurement_start_time >= FLOW_MEASUREMENT_DURATION:
+        return stop_flow_measurement()[2]
 
-    return False
+    return None
 
 
 # ============================================================================
@@ -779,8 +867,6 @@ _TREND_1H_READINGS   = 360  # 360 readings × 10s = 3600s = 1-hour average
 # Deque automatically drops oldest when full
 _flow_trend_history = deque(maxlen=_TREND_HISTORY_SIZE)   # 24h of inlet flow readings
 _flow_trend_1h = deque(maxlen=_TREND_1H_READINGS)         # 1h of inlet flow readings
-
-FLOW_TREND_DROP_PCT = get_config('waterflow.flow.trend_drop_pct', 0.20)
 
 
 def update_flow_trend(flow_inlet_lpm):
@@ -851,15 +937,18 @@ _daily_volume_date   = datetime.now().date()
 _volume_lock         = threading.Lock()
 
 
-def accumulate_flow_volume(flow_inlet_lpm):
+def accumulate_flow_volume(flow_inlet_lpm, duration_s=None):
     """
     Add the volume for one measurement period to the daily total.
-    flow_inlet_lpm (L/min) × FLOW_MEASUREMENT_DURATION (s) / 60 = liters
+    flow_inlet_lpm (L/min) x duration_s (s) / 60 = liters; duration_s defaults
+    to the nominal FLOW_MEASUREMENT_DURATION.
     Resets at midnight automatically.
     """
     global _daily_volume_liters, _daily_volume_date
     today = datetime.now().date()
-    liters_this_period = flow_inlet_lpm * FLOW_MEASUREMENT_DURATION / 60.0
+    if duration_s is None:
+        duration_s = FLOW_MEASUREMENT_DURATION
+    liters_this_period = flow_inlet_lpm * duration_s / 60.0
     with _volume_lock:
         if today != _daily_volume_date:
             _daily_volume_liters = 0.0
@@ -884,7 +973,7 @@ def update_daily_summary(temps, conditions, flow_inlet, flow_outlet):
     """Update DailySummary with current readings."""
     daily_summary.update('flow_inlet_lpm', flow_inlet)
     daily_summary.update('flow_outlet_lpm', flow_outlet)
-    daily_summary.update('daily_volume_l', get_daily_volume())
+    daily_summary.update_total('daily_volume_l', get_daily_volume())   # resets at midnight
 
     for sensor_name, temp_c in temps.items():
         if sensor_name in ('water', 'reservoir', 'nft_drain', 'nft drain', 'outdoor', 'enclosure'):
@@ -916,7 +1005,7 @@ def check_daily_summary():
         f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Generated: {datetime.now().strftime('%H:%M:%S')}\n\n"
         f"Water Flow:\n"
-        f"  Daily volume:     {_fmt(daily_summary.get_sum('daily_volume_l'), '.2f')} L\n"
+        f"  Volume pumped:    {_fmt(daily_summary.get_total('daily_volume_l'), '.1f')} L since the last summary\n"
         f"  Flow avg (inlet): {_fmt(daily_summary.get_avg('flow_inlet_lpm'), '.3f')} L/min\n"
         f"  Flow min (inlet): {_fmt(daily_summary.get_min('flow_inlet_lpm'), '.3f')} L/min\n\n"
         f"Temperatures (C):\n"
@@ -952,8 +1041,12 @@ def check_daily_summary():
 # MONITOR FLOW
 # ============================================================================
 
-def monitor_flow():
-    """Process completed flow measurement and check for issues"""
+def monitor_flow(elapsed_s=None):
+    """Process a completed flow measurement and check for issues.
+
+    elapsed_s is the measured length of the window (from check_flow_measurement);
+    without it the nominal FLOW_MEASUREMENT_DURATION is assumed.
+    """
     global smoothed_flow_inlet, smoothed_flow_outlet
     global flow_history_inlet, flow_history_outlet
     global low_flow_start_time, flow_imbalance_start_time
@@ -969,13 +1062,13 @@ def monitor_flow():
             snapshot_outlet = count_outlet
 
         # Calculate flow rates (L/min)
-        duration = FLOW_MEASUREMENT_DURATION
+        duration = elapsed_s if elapsed_s and elapsed_s > 0 else FLOW_MEASUREMENT_DURATION
         flow_inlet  = snapshot_inlet  / (FLOW_CALIBRATION_FACTOR * duration)
         flow_outlet = snapshot_outlet / (FLOW_CALIBRATION_FACTOR * duration)
 
         # Suppress flow readings while aerator is on or during settling period after it turns off.
         # The aerator causes air bubbles/turbulence that produce false high readings on both sensors.
-        time_since_toggle = time.time() - last_aeration_toggle
+        time_since_toggle = _now() - last_aeration_toggle
         if aeration_state or (not aeration_state and time_since_toggle < AERATOR_FLOW_SUPPRESS):
             if aeration_state:
                 logging.debug("[FLOW] Skipping reading — aerator is ON")
@@ -992,7 +1085,7 @@ def monitor_flow():
         restart_grace = MAIN_PUMP_LOW_SOC_CFG['cycling']['restart_grace_seconds']
         if main_pump_planned_off or (
                 main_pump_planned_restart is not None
-                and time.time() - main_pump_planned_restart < restart_grace):
+                and _now() - main_pump_planned_restart < restart_grace):
             low_flow_start_time = None
             logging.debug("[FLOW] Skipping reading — planned main pump OFF window / restart grace")
             return
@@ -1005,7 +1098,7 @@ def monitor_flow():
             return  # Skip accumulation, smoothing, and alert checks for this cycle
 
         # Accumulate daily volume (#15)
-        accumulate_flow_volume(flow_inlet)
+        accumulate_flow_volume(flow_inlet, duration)
 
         # Update flow trend history (#12)
         update_flow_trend(flow_inlet)
@@ -1053,8 +1146,8 @@ def monitor_flow():
                       and smoothed_flow_inlet < MAIN_PUMP_TARGET_FLOW - MAIN_PUMP_FLOW_DEADBAND)
             if at_max:
                 if pump_at_max_duty_start_time is None:
-                    pump_at_max_duty_start_time = time.time()
-                elif time.time() - pump_at_max_duty_start_time > 300:
+                    pump_at_max_duty_start_time = _now()
+                elif _now() - pump_at_max_duty_start_time > 300:
                     alert_type = 'pump_capacity_exhausted'
                     should_send, reason = alert_manager.should_send(alert_type)
                     if should_send:
@@ -1118,8 +1211,8 @@ def monitor_flow():
         # Check for low flow
         if smoothed_flow_inlet < MIN_FLOW_THRESHOLD:
             if low_flow_start_time is None:
-                low_flow_start_time = time.time()
-            elif time.time() - low_flow_start_time > FLOW_WARNING_DELAY:
+                low_flow_start_time = _now()
+            elif _now() - low_flow_start_time > FLOW_WARNING_DELAY:
                 if not recovery_attempted:
                     attempt_pump_recovery()
                 elif not low_flow_alert_sent:
@@ -1201,8 +1294,8 @@ def monitor_flow():
 
         if imbalance_triggered:
             if flow_imbalance_start_time is None:
-                flow_imbalance_start_time = time.time()
-            elif (time.time() - flow_imbalance_start_time > FLOW_IMBALANCE_DURATION
+                flow_imbalance_start_time = _now()
+            elif (_now() - flow_imbalance_start_time > FLOW_IMBALANCE_DURATION
                     and not leak_alert_sent):
                 alert_type = 'leak_detected'
                 should_send, reason = alert_manager.should_send(alert_type)
@@ -1333,9 +1426,11 @@ def read_all_temperatures():
                     elif logical_name == 'enclosure':
                         sensors_available['enclosure_temp'] = True
     else:
-        logging.warning(
+        _log_throttled(
+            'sensor_map',
             "DS18B20_SENSOR_MAP not configured — skipping unmapped sensors. "
-            "Configure sensor_map in config.json to assign sensor roles."
+            "Configure sensor_map in config.json to assign sensor roles.",
+            interval=3600,
         )
 
     if 'water' not in temps and 'reservoir' not in temps:
@@ -1344,6 +1439,23 @@ def read_all_temperatures():
         sensors_available['enclosure_temp'] = False
 
     return temps
+
+_temps_cache = {}
+_temps_cache_time = None
+
+
+def get_temperatures(max_age=0):
+    """Temperatures no older than max_age seconds (0 = read the sensors now).
+
+    Reading the DS18B20s takes about a second each, so the 1 s main loop must
+    not read them on every pass.
+    """
+    global _temps_cache, _temps_cache_time
+    if _temps_cache_time is None or _now() - _temps_cache_time >= max_age:
+        _temps_cache = read_all_temperatures()
+        _temps_cache_time = _now()
+    return _temps_cache
+
 
 # ============================================================================
 # BME280 ENVIRONMENTAL SENSOR (with cached calibration - #6)
@@ -1446,7 +1558,29 @@ def _alert_battery_data_unavailable(reason):
         )
         alert_manager.mark_sent(alert_type)
     else:
-        logging.warning(f"Battery data unavailable: {reason}")
+        _log_throttled('battery_data', f"Battery data unavailable: {reason}")
+
+
+_battery_file_mtime = None   # mtime last seen on BATTERY_DATA_FILE
+_battery_file_seen = None    # _now() at which that version was written (estimated)
+
+
+def _battery_file_age():
+    """Seconds since BATTERY_DATA_FILE was last rewritten, on the monotonic clock.
+
+    Comparing the mtime with time.time() reports a fresh file as stale when the
+    wall clock steps (NTP sync after boot). The wall clock is used only the first
+    time the file is seen; after that a changed mtime means "just rewritten".
+    """
+    global _battery_file_mtime, _battery_file_seen
+    mtime = os.path.getmtime(BATTERY_DATA_FILE)
+    now = _now()
+    if _battery_file_mtime is None or mtime < _battery_file_mtime:
+        _battery_file_seen = now - max(0.0, time.time() - mtime)
+    elif mtime > _battery_file_mtime:
+        _battery_file_seen = now
+    _battery_file_mtime = mtime
+    return now - _battery_file_seen
 
 
 def read_battery_soc():
@@ -1463,9 +1597,8 @@ def read_battery_soc():
             _alert_battery_data_unavailable("battery data file not found (is renogy.py running?)")
             return None
 
-        file_age = time.time() - os.path.getmtime(BATTERY_DATA_FILE)
+        file_age = _battery_file_age()
         if file_age > BATTERY_DATA_TIMEOUT:
-            logging.warning(f"Battery data file is stale ({file_age:.0f}s old)")
             _alert_battery_data_unavailable(f"battery data file is stale ({file_age:.0f}s old)")
             return None
 
@@ -1509,7 +1642,8 @@ def read_battery_soc():
                             pass
 
         if renogy_healthy_found and not renogy_monitor_healthy:
-            logging.warning("Renogy monitor reports unhealthy status - battery data may be unreliable")
+            _log_throttled('renogy_unhealthy',
+                           "Renogy monitor reports unhealthy status - battery data may be unreliable")
 
         if soc_found:
             alert_manager.clear('battery_data_unavailable')
@@ -1550,7 +1684,9 @@ def control_aeration():
         return
 
     soc = read_battery_soc()
-    temps = read_all_temperatures()
+    # The environment pass refreshes the cache every ENV_INTERVAL; this only
+    # reads the sensors itself if that pass has stopped running.
+    temps = get_temperatures(max_age=2 * ENV_INTERVAL)
 
     # The SOC tier caps the temperature schedule; it never lengthens on-time.
     prev_tier = None if _aeration_soc_tier is None else load_shed_tier
@@ -1588,7 +1724,7 @@ def control_aeration():
                 f"— resetting aeration timer"
             )
         _aeration_soc_tier = new_tier
-        last_aeration_toggle = time.time()
+        last_aeration_toggle = _now()
 
     # Alert if load shedding active
     if mode.startswith("disabled"):
@@ -1607,7 +1743,7 @@ def control_aeration():
         alert_manager.clear('aeration_disabled')
         # Tier changes are logged once above; nothing to log on every 1 s loop.
 
-    current_time = time.time()
+    current_time = _now()
     time_in_state = current_time - last_aeration_toggle
 
     if aeration_state:
@@ -1642,7 +1778,7 @@ def control_main_pump_low_soc():
     prev_mode = pump_low_soc.mode
     flow_alert = any(alert_manager.is_active(a) for a in _FLOW_ALERT_TYPES)
     mode, run, duty = pump_low_soc.update(
-        time.time(), MAIN_PUMP_LOW_SOC_CFG, read_battery_soc(), battery_soc_confidence,
+        _now(), MAIN_PUMP_LOW_SOC_CFG, read_battery_soc(), battery_soc_confidence,
         water_temp_c=last_water_temp_c, flow_alert_active=flow_alert,
         backup_active=backup_pump_active,
     )
@@ -1667,7 +1803,7 @@ def control_main_pump_low_soc():
         logging.warning("Main pump planned OFF window ended — restarting main pump")
         set_main_pump(True, duty_cycle=duty)
         main_pump_planned_off = False
-        main_pump_planned_restart = time.time()
+        main_pump_planned_restart = _now()
     elif mode != prev_mode and main_pump_duty_cycle > 0:
         set_main_pump(True, duty_cycle=duty)
     elif (duty is not None and MAIN_PUMP_PWM_ENABLED and main_pump_duty_cycle > 0
@@ -1710,12 +1846,14 @@ def control_ventilation_fan(conditions, temps):
         # Fallback: use Renogy controller temperature if configured and available.
         # The MPPT chip runs 5–15°C above enclosure ambient under load, so this
         # causes the fan to run more conservatively (earlier ON) — the safe direction.
-        if (get_config('waterflow.fan.use_renogy_temp_as_enclosure_fallback', False)
+        if (get_config('waterflow.fan.use_renogy_temp_as_enclosure_fallback', True)
                 and renogy_controller_temp_c is not None):
             enclosure_temp_c = renogy_controller_temp_c
-            logging.warning(
+            _log_throttled(
+                'fan_fallback',
                 f"BME280 and enclosure DS18B20 unavailable — using Renogy controller "
-                f"temperature ({renogy_controller_temp_c:.1f}°C) as enclosure proxy"
+                f"temperature ({renogy_controller_temp_c:.1f}°C) as enclosure proxy",
+                interval=3600,
             )
         else:
             if fan_running:
@@ -1723,7 +1861,7 @@ def control_ventilation_fan(conditions, temps):
                 fan_running = False
             return
 
-    if time.time() - fan_last_toggle < FAN_MIN_TOGGLE_INTERVAL:
+    if _now() - fan_last_toggle < FAN_MIN_TOGGLE_INTERVAL:
         return
 
     # Battery SOC load shedding: at critically low SOC only run fan if above
@@ -1775,7 +1913,7 @@ def control_ventilation_fan(conditions, temps):
     if should_run != fan_running:
         set_fan(should_run)
         fan_running = should_run
-        fan_last_toggle = time.time()
+        fan_last_toggle = _now()
 
 # ============================================================================
 # TEMPERATURE MONITORING (NFT System)
@@ -1940,12 +2078,12 @@ def check_humidity_alerts(conditions):
 # PUMP TESTING
 # ============================================================================
 
-_last_pump_test_skip_log = 0.0
+_last_pump_test_skip_log = None
 
 
 def should_run_pump_test():
     """Check if backup pump test is due"""
-    global last_pump_test
+    global _last_pump_test_skip_log
 
     if DISABLE_PUMP_TESTING:
         return False
@@ -1956,16 +2094,19 @@ def should_run_pump_test():
     if time.time() - last_pump_test <= PUMP_TEST_INTERVAL:
         return False
 
-    # Skip pump test if battery SOC is too low (#14); log at most hourly while overdue
-    global _last_pump_test_skip_log
+    # A routine test switches the main pump off and on again: not during a
+    # low-flow episode (recovery owns the pumps) or a planned low-SOC OFF window.
+    if not backup_pump_active and (low_flow_start_time is not None or main_pump_planned_off):
+        return False
+
+    # Skip the test if battery SOC is unknown or too low (#14); log at most hourly while overdue
     soc = read_battery_soc()
-    if soc is not None and soc < BATTERY_SKIP_PUMP_TEST_BELOW:
-        if time.time() - _last_pump_test_skip_log >= 3600:
-            logging.warning(
-                f"Skipping pump test: battery SOC {soc:.1f}% < "
-                f"{BATTERY_SKIP_PUMP_TEST_BELOW}% (threshold)"
-            )
-            _last_pump_test_skip_log = time.time()
+    if soc is None or soc < BATTERY_SKIP_PUMP_TEST_BELOW:
+        if _last_pump_test_skip_log is None or _now() - _last_pump_test_skip_log >= 3600:
+            reason = ("battery SOC unknown" if soc is None else
+                      f"battery SOC {soc:.1f}% < {BATTERY_SKIP_PUMP_TEST_BELOW}% (threshold)")
+            logging.warning(f"Skipping pump test: {reason}")
+            _last_pump_test_skip_log = _now()
         return False
 
     return True
@@ -1984,8 +2125,10 @@ def test_backup_pump():
         time.sleep(PUMP_CYCLE_PAUSE)
         set_main_pump(True)
 
-        time.sleep(PUMP_TEST_DURATION)
-        test_flow = smoothed_flow_inlet
+        # Let the flow settle, then measure it: smoothed_flow_inlet cannot
+        # update while this function blocks the main loop.
+        time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
+        test_flow = _take_fresh_flow_reading()
 
         if test_flow >= MIN_FLOW_THRESHOLD:
             backup_pump_active = False
@@ -2031,8 +2174,10 @@ def test_backup_pump():
         time.sleep(PUMP_CYCLE_PAUSE)
         set_backup_pump(True)
 
-        time.sleep(PUMP_TEST_DURATION)
-        test_flow = smoothed_flow_inlet
+        # Let the flow settle, then measure it: smoothed_flow_inlet cannot
+        # update while this function blocks the main loop.
+        time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
+        test_flow = _take_fresh_flow_reading()
 
         set_backup_pump(False)
         time.sleep(PUMP_CYCLE_PAUSE)
@@ -2060,6 +2205,7 @@ def test_backup_pump():
         )
 
     last_pump_test = time.time()
+    save_state()
 
 # ============================================================================
 # PUMP RECOVERY
@@ -2067,16 +2213,17 @@ def test_backup_pump():
 
 def _take_fresh_flow_reading():
     """
-    Take a fresh flow measurement while the main loop is blocked (e.g. during
-    pump recovery sleeps).  smoothed_flow_inlet is only updated by monitor_flow()
-    which cannot run while attempt_pump_recovery() holds the thread, so we do
-    a one-shot measurement here instead of reading the stale smoothed value.
+    Take a fresh flow measurement while the main loop is blocked (pump recovery
+    and pump tests). smoothed_flow_inlet is only updated by monitor_flow(), which
+    cannot run while the caller holds the thread, so this does a one-shot
+    measurement instead of reading the stale smoothed value.
+
+    Leaves counting stopped; the main loop starts the next window.
     """
     start_flow_measurement()
     time.sleep(FLOW_MEASUREMENT_DURATION + 1)
-    with _flow_lock:
-        snapshot = count_inlet
-    return snapshot / (FLOW_CALIBRATION_FACTOR * FLOW_MEASUREMENT_DURATION)
+    pulses, _, elapsed = stop_flow_measurement()
+    return pulses / (FLOW_CALIBRATION_FACTOR * max(elapsed, float(FLOW_MEASUREMENT_DURATION)))
 
 
 def attempt_pump_recovery():
@@ -2092,6 +2239,13 @@ def attempt_pump_recovery():
     global recovery_attempted, backup_pump_active
 
     recovery_attempted = True
+    if backup_pump_active:
+        # Already failed over: the main pump is parked pending inspection, so
+        # there is nothing left to cycle (and it must not be switched on next
+        # to the backup pump). monitor_flow() raises the low_flow alert on its
+        # next pass because recovery_attempted stays set.
+        logging.error("Low flow while on the backup pump - no further automatic recovery")
+        return
     logging.warning("Low flow recovery initiated - cycling main pump")
 
     for attempt in range(1, PUMP_CYCLE_MAX_ATTEMPTS + 1):
@@ -2126,7 +2280,7 @@ def attempt_pump_recovery():
     time.sleep(PUMP_CYCLE_PAUSE)
     set_backup_pump(True)
     backup_pump_active = True
-    recovery_attempted = False  # Allow one recovery attempt on the backup pump
+    save_state()
 
     time.sleep(PUMP_RECOVERY_WAIT)
     fresh_flow = _take_fresh_flow_reading()
@@ -2173,58 +2327,64 @@ def attempt_pump_recovery():
 # STATE PERSISTENCE
 # ============================================================================
 
+_saved_pump_state = None   # what save_state() last wrote
+
+
 def load_state():
-    """Load persistent state from file"""
-    global last_pump_test, backup_pump_active
+    """Load the pump state (failover flag, last pump test time) from PUMP_STATE_FILE.
+
+    Called after setup_gpio(): if the system was on the backup pump, it goes
+    straight back to it instead of retrying the failed main pump.
+    """
+    global last_pump_test, backup_pump_active, _saved_pump_state
 
     try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                state = json.load(f)
-                last_pump_test   = state.get('last_pump_test',   time.time())
-                backup_pump_active = state.get('backup_pump_active', False)
-                if backup_pump_active:
-                    set_main_pump(False)
-                    set_backup_pump(True)
-                    logging.warning(
-                        "Reboot detected while on backup pump failover - "
-                        "main pump remains off pending manual inspection"
-                    )
+        with open(PUMP_STATE_FILE, 'r') as f:
+            state = json.load(f)
+        last_pump_test = float(state.get('last_pump_test') or time.time())
+        backup_pump_active = bool(state.get('backup_pump_active', False))
+        _saved_pump_state = {'last_pump_test': last_pump_test,
+                             'backup_pump_active': backup_pump_active}
+        if backup_pump_active:
+            set_main_pump(False)
+            set_backup_pump(True)
+            logging.warning(
+                "Restart while on backup pump failover - "
+                "main pump remains off pending manual inspection"
+            )
+    except FileNotFoundError:
+        last_pump_test = time.time()    # first run: the pump-test interval starts now
     except Exception as e:
-        logging.error(f"Failed to load state: {e}")
+        logging.error(f"Failed to load pump state from {PUMP_STATE_FILE}: {e}")
         last_pump_test = time.time()
+
+    save_state()
 
 
 def save_state():
-    """Save persistent state to file (ramdisk). Also writes persistent path when active."""
+    """Write the pump state to PUMP_STATE_FILE if it changed (atomic, fsynced).
+
+    last_pump_test is wall-clock time on purpose: it has to survive reboots.
+    """
+    global _saved_pump_state
+
+    state = {'last_pump_test': last_pump_test, 'backup_pump_active': backup_pump_active}
+    if state == _saved_pump_state:
+        return      # nothing new: no SD card write
+
     try:
-        state = {
-            'last_pump_test':    last_pump_test,
-            'backup_pump_active': backup_pump_active,
-            'last_save':         time.time()
-        }
-
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True) \
-            if os.path.dirname(STATE_FILE) else None
-
-        tmp = STATE_FILE + '.tmp'
+        directory = os.path.dirname(PUMP_STATE_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = PUMP_STATE_FILE + '.tmp'
         with open(tmp, 'w') as f:
-            json.dump(state, f)
-        os.rename(tmp, STATE_FILE)
-
-        # Write to persistent storage when backup pump is active (#3)
-        if backup_pump_active:
-            try:
-                os.makedirs(os.path.dirname(PERSISTENT_STATE_FILE), exist_ok=True)
-                tmp_p = PERSISTENT_STATE_FILE + '.tmp'
-                with open(tmp_p, 'w') as f:
-                    json.dump(state, f)
-                os.rename(tmp_p, PERSISTENT_STATE_FILE)
-            except Exception as e:
-                logging.error(f"Failed to save persistent state: {e}")
-
+            json.dump(dict(state, last_save=time.time()), f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, PUMP_STATE_FILE)
+        _saved_pump_state = state
     except Exception as e:
-        logging.error(f"Failed to save state: {e}")
+        logging.error(f"Failed to save pump state to {PUMP_STATE_FILE}: {e}")
 
 # ============================================================================
 # PROMETHEUS METRICS
@@ -2525,25 +2685,7 @@ def write_prometheus_metrics(temps=None, conditions=None):
         logging.error(f"Prometheus write error: {e}")
 
 
-def write_unhealthy_status():
-    """Write minimal metrics when system is failing"""
-    try:
-        with open(PROM_TEMP_FILE, 'w') as f:
-            f.write('# HELP waterflow_monitor_healthy Monitor health status\n')
-            f.write('# TYPE waterflow_monitor_healthy gauge\n')
-            f.write('waterflow_monitor_healthy{source="waterflow"} 0\n')
 
-            f.write('# HELP waterflow_consecutive_failures Consecutive failure count\n')
-            f.write('# TYPE waterflow_consecutive_failures gauge\n')
-            f.write(f'waterflow_consecutive_failures{{source="waterflow"}} {consecutive_failures}\n')
-
-            f.write('# HELP waterflow_last_update Last update timestamp\n')
-            f.write('# TYPE waterflow_last_update gauge\n')
-            f.write(f'waterflow_last_update{{source="waterflow"}} {int(time.time())}\n')
-
-        os.rename(PROM_TEMP_FILE, PROM_OUTPUT_FILE)
-    except Exception as e:
-        logging.error(f"Failed to write unhealthy status: {e}")
 
 # ============================================================================
 # STARTUP NOTIFICATION (#4)
@@ -2608,12 +2750,35 @@ def send_startup_notification():
         logging.warning(f"Failed to send startup notification: {e}")
 
 # ============================================================================
+# FLOW WINDOW PROCESSING
+# ============================================================================
+
+def process_flow_window(elapsed_s):
+    """Run monitor_flow() for a finished measurement window.
+
+    monitor_flow() counts its own failures in consecutive_failures and zeroes
+    the count when it processes a reading, so the count is not reset here:
+    doing that after every call kept waterflow_monitor_healthy at 1 even when
+    every window failed.
+    """
+    global consecutive_failures
+    try:
+        monitor_flow(elapsed_s)
+    except Exception as e:     # backstop: monitor_flow handles its own errors
+        consecutive_failures += 1
+        logging.error(
+            f"Flow monitoring failed "
+            f"({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}"
+        )
+
+
+# ============================================================================
 # MAIN LOOP
 # ============================================================================
 
 def main():
     """Main monitoring loop"""
-    global consecutive_failures, _boot_reason_state
+    global _boot_reason_state
 
     print("=" * 70)
     print("   HYDROPONIC MONITORING - ENHANCED VERSION")
@@ -2671,8 +2836,14 @@ def main():
 
     start_flow_measurement()
 
-    iteration = 0
-    last_save_time = time.time()
+    # Schedules run on the monotonic clock. Counting loop passes assumed every
+    # pass takes exactly MAIN_LOOP_INTERVAL, which stretched every interval
+    # whenever a pass ran long.
+    started = _now()
+    next_env = started + ENV_INTERVAL
+    next_prom = started + PROM_INTERVAL
+    next_minute = started + 60
+    last_save_time = started
 
     # Keep references to conditions/temps for passing to prometheus writer
     _last_conditions = None
@@ -2680,25 +2851,19 @@ def main():
 
     try:
         while True:
-            iteration += 1
-            loop_start = time.time()
+            loop_start = _now()
+
+            try:
+                apply_pending_reload()
+            except Exception as e:
+                logging.error(f"Config reload failed: {e}")
 
             # Check if flow measurement complete
-            if check_flow_measurement():
-                try:
-                    monitor_flow()
-                    consecutive_failures = 0
-                except Exception as e:
-                    consecutive_failures += 1
-                    logging.error(
-                        f"Flow monitoring failed "
-                        f"({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}"
-                    )
-
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        logging.critical("Multiple consecutive failures! Check sensors!")
-                        write_unhealthy_status()
-
+            flow_window_s = check_flow_measurement()
+            if flow_window_s is not None:
+                process_flow_window(flow_window_s)
+                start_flow_measurement()
+            elif not flow_measurement_active:
                 start_flow_measurement()
 
             # Run every iteration (1 second)
@@ -2712,11 +2877,12 @@ def main():
             except Exception as e:
                 logging.error(f"Main pump low-SOC control failed: {e}")
 
-            # Environmental monitoring every 30 seconds
-            if iteration % 30 == 0:
+            # Environmental monitoring every ENV_INTERVAL seconds
+            if loop_start >= next_env:
+                next_env = loop_start + ENV_INTERVAL
                 try:
                     conditions = read_enclosure_conditions()
-                    temps = read_all_temperatures()
+                    temps = get_temperatures()
                     _last_conditions = conditions
                     _last_temps = temps
                     control_ventilation_fan(conditions, temps)
@@ -2728,33 +2894,41 @@ def main():
                 except Exception as e:
                     logging.error(f"Environmental monitoring failed: {e}")
 
+            minute_due = loop_start >= next_minute
+            if minute_due:
+                next_minute = loop_start + 60
+
             # Daily summary check every 60 seconds
-            if iteration % 60 == 0:
+            if minute_due:
                 try:
                     check_daily_summary()
                 except Exception as e:
                     logging.error(f"Daily summary check failed: {e}")
 
-            # Write Prometheus metrics every 10 seconds
-            if iteration % 10 == 0:
+            # Write Prometheus metrics every PROM_INTERVAL seconds
+            if loop_start >= next_prom:
+                next_prom = loop_start + PROM_INTERVAL
                 write_prometheus_metrics(temps=_last_temps, conditions=_last_conditions)
 
             # Pump test check every 60 seconds
-            if iteration % 60 == 0:
+            if minute_due:
                 if should_run_pump_test():
                     try:
                         test_backup_pump()
                     except Exception as e:
                         logging.error(f"Pump test failed: {e}")
+                    finally:
+                        # Drop the window that spanned the pump switching
+                        start_flow_measurement()
 
             # Save state every 10 minutes
-            if time.time() - last_save_time > 600:
+            if _now() - last_save_time > 600:
                 save_state()
                 alert_manager.save()
-                last_save_time = time.time()
+                last_save_time = _now()
 
             # Sleep remainder of interval
-            elapsed = time.time() - loop_start
+            elapsed = _now() - loop_start
             if elapsed < MAIN_LOOP_INTERVAL:
                 time.sleep(MAIN_LOOP_INTERVAL - elapsed)
 

@@ -36,8 +36,10 @@ class FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
-        pass
+    tls_contexts = []
+
+    def starttls(self, context=None):
+        FakeSMTP.tls_contexts.append(context)
 
     def login(self, user, password):
         pass
@@ -49,6 +51,7 @@ class FakeSMTP:
 class TestEmailRetry(unittest.TestCase):
     def setUp(self):
         FakeSMTP.script, FakeSMTP.sent, FakeSMTP.calls = [], [], []
+        FakeSMTP.tls_contexts = []
         patches = [
             mock.patch.object(mc.smtplib, 'SMTP', FakeSMTP),
             mock.patch.object(mc, 'get_config', lambda k, d=None: CFG.get(k, d)),
@@ -68,6 +71,15 @@ class TestEmailRetry(unittest.TestCase):
                     return
             time.sleep(0.005)
         self.fail('retry queue did not drain')
+
+    def test_starttls_verifies_the_server_certificate(self):
+        # smtplib's default STARTTLS context accepts any certificate
+        import ssl
+        self.assertTrue(mc.send_email('s', 'b'))
+        (ctx,) = FakeSMTP.tls_contexts
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
 
     def test_smtp_has_timeout(self):
         self.assertTrue(mc.send_email('s', 'b'))

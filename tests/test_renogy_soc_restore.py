@@ -104,7 +104,9 @@ class TestRenogySocRestore(unittest.TestCase):
             json.dump(self.saved, f)
         self.r = load_renogy(self.tmp)
         root = logging.getLogger()
-        self.addCleanup(lambda: [h.close() for h in root.handlers[:]
+        # renogy.py installs a FileHandler in self.tmp; detach it before the
+        # directory goes away, or later tests would log into a deleted path.
+        self.addCleanup(lambda: [(root.removeHandler(h), h.close()) for h in root.handlers[:]
                                  if getattr(h, 'baseFilename', '').startswith(self.tmp)])
 
     def poll(self):

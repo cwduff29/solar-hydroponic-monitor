@@ -17,6 +17,7 @@ import json
 import time
 import logging
 import smtplib
+import ssl
 import threading
 from datetime import datetime, timedelta, date
 from email.message import EmailMessage
@@ -30,18 +31,30 @@ _config_lock = threading.Lock()
 _config_path = None
 
 
-def load_config(path):
-    """Load JSON config from path. Called once at startup."""
+def load_config(path, required=False):
+    """Load JSON config from path. Called once at startup.
+
+    With required=True an unreadable or invalid file ends the process (exit
+    status 1) instead of continuing on built-in defaults: those do not match
+    the installed hardware (PWM main pump off, different thresholds), so a
+    typo in config.json would otherwise silently change how the system runs.
+    """
     global _config, _config_path
     _config_path = path
     with _config_lock:
         try:
             with open(path, 'r') as f:
-                _config = json.load(f)
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("top level of the config must be a JSON object")
+            _config = loaded
             logging.info(f"Config loaded from {path}")
         except Exception as e:
             logging.error(f"Failed to load config from {path}: {e}")
             _config = {}
+            if required:
+                raise SystemExit(
+                    f"Cannot start: config file {path} is unreadable or invalid ({e})") from e
     return _config
 
 
@@ -142,7 +155,8 @@ def _deliver_email(subject, body):
     with smtplib.SMTP(os.environ.get('SMTP_SERVER', 'smtp.gmail.com'),
                       int(os.environ.get('SMTP_PORT', '587')),
                       timeout=get_config('alerts.smtp_timeout_seconds', 20)) as server:
-        server.starttls()
+        # Without a context smtplib does not verify the server certificate
+        server.starttls(context=ssl.create_default_context())
         server.login(smtp_user, os.environ.get('SMTP_PASSWORD', ''))
         server.send_message(msg)
 
@@ -231,12 +245,17 @@ class AlertManager:
     - persistent_path: persistent fallback (in /var/lib/renogy/)
 
     On load: tries ramdisk first, then persistent.
-    On save: always writes ramdisk; also writes persistent when any alert is active.
+    On save: writes both atomically (tmp file + rename), the persistent one
+    only when its content changed, so a power cut cannot leave a truncated
+    file and an unchanged state costs no SD card write.
     """
 
     def __init__(self, ramdisk_path, persistent_path,
                  cooldown_minutes=60, reminder_hours=12):
-        self._lock = threading.Lock()
+        # Re-entrant: a SIGTERM that lands inside save() unwinds into the
+        # service's finally block, which calls save() again on this thread.
+        self._lock = threading.RLock()
+        self._persisted_payload = None   # what the persistent file last received
         self._ramdisk_path = ramdisk_path
         self._persistent_path = persistent_path
         self._cooldown_minutes = cooldown_minutes
@@ -299,33 +318,39 @@ class AlertManager:
             return False
 
     def save(self):
-        """
-        Save state to ramdisk. Also write persistent file if any alert is active
-        (every time, not rate-limited).
-        """
+        """Save state to the ramdisk file and, if it changed, the persistent file."""
         with self._lock:
-            data = self._serialize()
-            # Write ramdisk
+            payload = json.dumps(self._serialize())
             try:
-                os.makedirs(os.path.dirname(self._ramdisk_path), exist_ok=True) \
-                    if os.path.dirname(self._ramdisk_path) else None
-                with open(self._ramdisk_path, 'w') as f:
-                    json.dump(data, f)
+                self._write_atomic(self._ramdisk_path, payload, durable=False)
             except Exception as e:
                 logging.error(f"Failed to save alert state to ramdisk {self._ramdisk_path}: {e}")
 
-            # Always write persistent file so that a cleared-alert state survives
-            # a ramdisk loss (reboot). Without this, stale "active" flags in the
-            # on-disk file would suppress re-alerting after restart.
-            if self._persistent_path:
+            # The persistent copy keeps a cleared-alert state across a reboot
+            # (ramdisk loss). Without it, stale "active" flags in the on-disk
+            # file would suppress re-alerting after restart.
+            if self._persistent_path and payload != self._persisted_payload:
                 try:
-                    os.makedirs(os.path.dirname(self._persistent_path), exist_ok=True)
-                    with open(self._persistent_path, 'w') as f:
-                        json.dump(data, f)
+                    self._write_atomic(self._persistent_path, payload, durable=True)
+                    self._persisted_payload = payload
                 except Exception as e:
                     logging.error(
                         f"Failed to save alert state to persistent {self._persistent_path}: {e}"
                     )
+
+    @staticmethod
+    def _write_atomic(path, payload, durable):
+        """Write payload to path via a temp file and rename; fsync if durable."""
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            f.write(payload)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(tmp, path)
 
     def should_send(self, alert_type):
         """
@@ -565,6 +590,7 @@ class DailySummary:
     def __init__(self, state_file=None):
         self._lock = threading.Lock()
         self._stats = {}  # {key: {'sum': float, 'count': int, 'min': float, 'max': float}}
+        self._totals = {}  # {key: {'last': float, 'total': float}} (see update_total)
         self._sent_today = False
         self._last_sent_date = None
         self._state_file = state_file
@@ -596,6 +622,34 @@ class DailySummary:
                 s['min'] = value
             if value > s['max']:
                 s['max'] = value
+
+    def update_total(self, key, value):
+        """Feed a running counter that restarts from zero on its own (e.g. a
+        figure that accumulates through the day and resets at midnight).
+
+        Only the increases are added up, so get_total() is the amount added
+        since the last summary, however many times the counter reset. Summing
+        the samples themselves (update + get_sum) adds the same running total
+        once per sample.
+        """
+        if value is None:
+            return
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            c = self._totals.get(key)
+            if c is None:
+                self._totals[key] = {'last': value, 'total': 0.0}
+                return
+            c['total'] += (value - c['last']) if value >= c['last'] else value
+            c['last'] = value
+
+    def get_total(self, key):
+        with self._lock:
+            c = self._totals.get(key)
+            return c['total'] if c else None
 
     def get_avg(self, key):
         with self._lock:
@@ -647,6 +701,8 @@ class DailySummary:
             self._last_sent_date = today
             self._sent_today = True
             self._stats = {}
+            for c in self._totals.values():
+                c['total'] = 0.0      # keep 'last': the counter itself carries on
         if self._state_file:
             try:
                 os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
@@ -705,7 +761,6 @@ def validate_config():
     # -----------------------------------------------------------------------
     low_soc    = _get('waterflow.battery_load_shedding.disable_threshold_pct',  30)
     reduce_soc = _get('waterflow.battery_load_shedding.reduce_threshold_pct',   50)
-    normal_soc = _get('waterflow.battery_load_shedding.normal_threshold_pct',   70)
 
     if not (0 <= low_soc <= 100):
         issues.append(('ERROR',
@@ -715,18 +770,10 @@ def validate_config():
         issues.append(('ERROR',
             f"waterflow.battery_load_shedding.reduce_threshold_pct={reduce_soc} "
             f"out of range [0, 100]"))
-    if not (0 <= normal_soc <= 100):
-        issues.append(('ERROR',
-            f"waterflow.battery_load_shedding.normal_threshold_pct={normal_soc} "
-            f"out of range [0, 100]"))
-    if low_soc >= normal_soc:
-        issues.append(('ERROR',
-            f"Battery load shedding: disable_threshold_pct ({low_soc}) "
-            f"must be < normal_threshold_pct ({normal_soc})"))
-    if not (low_soc <= reduce_soc <= normal_soc):
+    if low_soc > reduce_soc:
         issues.append(('ERROR',
             f"Battery load shedding thresholds must satisfy "
-            f"disable ({low_soc}) <= reduce ({reduce_soc}) <= normal ({normal_soc})"))
+            f"disable ({low_soc}) <= reduce ({reduce_soc})"))
 
     # -----------------------------------------------------------------------
     # Voltage thresholds

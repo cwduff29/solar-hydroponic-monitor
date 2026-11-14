@@ -17,7 +17,8 @@ INSTALL_LOCAL_PROMETHEUS="${INSTALL_LOCAL_PROMETHEUS:-0}"
 # Hosts allowed to reach node_exporter (:9100), and :9090 if local Prometheus is on.
 SCRAPE_HOSTS="${SCRAPE_HOSTS:-192.168.99.201 192.168.99.224}"
 # WiFi self-heal timer: cycles the radio, re-authorizes the USB dongle and, after
-# about 12 min without the gateway, reboots the Pi. INSTALL_WIFI_HEAL=0 skips it.
+# about 12 min without the gateway, reboots the Pi (at most 3 times in a row).
+# INSTALL_WIFI_HEAL=0 skips it.
 INSTALL_WIFI_HEAL="${INSTALL_WIFI_HEAL:-1}"
 
 # Check root
@@ -84,13 +85,13 @@ echo "[1/13] Installing Python packages..."
 # a drop-in RPi.GPIO replacement backed by lgpio instead of the broken sysfs interface.
 # A kernel without the sysfs GPIO class at all is newer still and also needs rpi-lgpio.
 # (|| true: under pipefail an empty match would otherwise end the installer silently.)
-GPIO_PKG="RPi.GPIO"
+GPIO_PKG="RPi.GPIO==0.7.1"
 GPIO_CHIP=$(ls /sys/class/gpio/ 2>/dev/null | grep -o 'gpiochip[0-9]*' | head -1 || true)
 GPIO_CHIP_NUM=${GPIO_CHIP#gpiochip}
 if [[ -z "$GPIO_CHIP" && -e /dev/gpiochip0 ]] \
         || [[ -n "$GPIO_CHIP_NUM" && "$GPIO_CHIP_NUM" -ge 512 ]]; then
     echo "      Detected new-style GPIO (${GPIO_CHIP:-no sysfs GPIO class}) — using rpi-lgpio"
-    GPIO_PKG="rpi-lgpio"
+    GPIO_PKG="rpi-lgpio==0.6"
     # Remove pip-installed RPi.GPIO if present; it shadows rpi-lgpio and breaks edge detection
     pip3 uninstall -y RPi.GPIO --break-system-packages 2>/dev/null || \
     pip3 uninstall -y RPi.GPIO 2>/dev/null || true
@@ -98,8 +99,10 @@ else
     echo "      Detected legacy GPIO chip (${GPIO_CHIP:-unknown}) — using RPi.GPIO"
 fi
 
-pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280 --break-system-packages 2>/dev/null || \
-pip3 install renogymodbus "$GPIO_PKG" smbus2 RPi.bme280
+# Versions are pinned (requirements.txt, and the GPIO package above) so that a
+# reinstall gets the versions that were tested, not whatever PyPI serves that day.
+pip3 install -r "$INSTALL_DIR/requirements.txt" "$GPIO_PKG" --break-system-packages 2>/dev/null || \
+pip3 install -r "$INSTALL_DIR/requirements.txt" "$GPIO_PKG"
 echo "      Done."
 
 # --- [2/13] Prometheus node_exporter ---
@@ -249,21 +252,10 @@ echo "      Installed /etc/sysctl.d/99-zz-crash-capture.conf (kernel errors reac
 # --- [7/13] User group memberships ---
 echo "[7/13] Adding $SERVICE_USER to hardware groups..."
 
-# Create watchdog group and udev rule if needed (not present by default on Pi OS)
-if ! getent group watchdog &>/dev/null; then
-    groupadd --system watchdog
-    echo "      Created system group: watchdog"
-fi
-WATCHDOG_UDEV="/etc/udev/rules.d/60-watchdog.rules"
-if [[ ! -f "$WATCHDOG_UDEV" ]]; then
-    echo 'KERNEL=="watchdog", GROUP="watchdog", MODE="0660"' > "$WATCHDOG_UDEV"
-    udevadm control --reload-rules
-    udevadm trigger --name-match=watchdog 2>/dev/null || true
-    echo "      Created udev rule: $WATCHDOG_UDEV"
-fi
-
-usermod -aG dialout,gpio,i2c,watchdog "$SERVICE_USER"
-echo "      Added to: dialout (serial), gpio, i2c, watchdog"
+# No watchdog group: systemd (PID 1) owns /dev/watchdog (step 6), so the
+# services never open it. A group and udev rule left by an older install are harmless.
+usermod -aG dialout,gpio,i2c "$SERVICE_USER"
+echo "      Added to: dialout (serial), gpio, i2c"
 echo "      NOTE: Group changes take effect after next login / reboot."
 
 # --- [8/13] Ramdisk ---
@@ -325,7 +317,15 @@ sed -e "s|__USER__|$SERVICE_USER|g" \
     -e "s|__DIR__|$INSTALL_DIR|g" \
     "$INSTALL_DIR/systemd/waterflow.service" > /etc/systemd/system/waterflow.service
 
+# battery_shutdown runs as root, so its code must not live in a directory the
+# service user can write to: it runs from a root-owned copy. Re-run this
+# installer after changing battery_shutdown.py. (config.json stays in the
+# install directory so the shutdown settings can still be edited there.)
+ROOT_LIB=/usr/local/lib/solar-hydroponic
+install -d -o root -g root -m 755 "$ROOT_LIB"
+install -o root -g root -m 644 "$INSTALL_DIR/battery_shutdown.py" "$ROOT_LIB/battery_shutdown.py"
 sed -e "s|__DIR__|$INSTALL_DIR|g" \
+    -e "s|__LIB__|$ROOT_LIB|g" \
     "$INSTALL_DIR/systemd/battery_shutdown.service" > /etc/systemd/system/battery_shutdown.service
 
 # Marks orderly shutdowns; waterflow uses it to tell reboots from watchdog resets
@@ -346,7 +346,7 @@ if [[ "$INSTALL_WIFI_HEAL" == "1" ]]; then
         cp "$INSTALL_DIR/systemd/wifi-heal.service" "$INSTALL_DIR/systemd/wifi-heal.timer" /etc/systemd/system/
         systemctl daemon-reload
         systemctl enable --now wifi-heal.timer
-        echo "      wifi-heal.timer enabled (pings gateway $GW every 2 min)."
+        echo "      wifi-heal.timer enabled (pings the default gateway every 2 min; $GW until it has seen one)."
     fi
 else
     echo "      wifi-heal skipped (INSTALL_WIFI_HEAL=0)."

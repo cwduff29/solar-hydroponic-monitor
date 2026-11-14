@@ -34,6 +34,7 @@ import json
 import time
 import logging
 import smtplib
+import ssl
 import signal
 import subprocess
 from datetime import datetime
@@ -226,7 +227,8 @@ def send_shutdown_alert(soc, cfg, halting=True):
         msg['Subject'] = subject
         msg.set_content(body)
         with smtplib.SMTP(smtp_server, smtp_port, timeout=15) as server:
-            server.starttls()
+            # Without a context smtplib does not verify the server certificate
+            server.starttls(context=ssl.create_default_context())
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
         logging.warning(f"battery_shutdown: shutdown alert email sent to {smtp_recipients}")

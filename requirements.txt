@@ -1,0 +1,8 @@
+# Python packages for the monitor services, pinned to the versions running on
+# the Pi (2026-11). install.sh installs these plus one GPIO package that
+# depends on the kernel: rpi-lgpio (Bookworm and later) or RPi.GPIO (older).
+renogymodbus==0.0.23
+minimalmodbus==2.1.1
+pyserial==3.5
+smbus2==0.4.2
+RPi.bme280==0.2.4

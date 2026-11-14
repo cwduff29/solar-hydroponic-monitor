@@ -49,24 +49,16 @@ from monitor_common import (
 # ============================================================================
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.json')
-load_config(_CONFIG_PATH)
+load_config(_CONFIG_PATH, required=True)
 validate_config()
 
 # ============================================================================
 # MAINTENANCE CONTROLS - INDIVIDUAL SUBSYSTEM DISABLE FLAGS
 # ============================================================================
-# Set any of these to True to disable specific functions during maintenance:
-
-DISABLE_EMAILS = False              # True = No email alerts sent (all types)
-DISABLE_LOW_BATTERY_ALERTS = False  # True = No low battery/SOC warnings
-DISABLE_FAULT_ALERTS = False        # True = No hardware fault warnings
-DISABLE_TEMPERATURE_ALERTS = False  # True = No temperature warnings
-DISABLE_CAPACITY_ALERTS = False     # True = No battery capacity warnings
-
-# Quick presets (uncomment one to use):
-# BATTERY_MAINTENANCE: DISABLE_LOW_BATTERY_ALERTS=True, DISABLE_CAPACITY_ALERTS=True
-# TESTING_MODE: DISABLE_EMAILS=True
-# FULL_MAINTENANCE: All True
+# DISABLE_EMAILS, DISABLE_LOW_BATTERY_ALERTS, DISABLE_FAULT_ALERTS,
+# DISABLE_TEMPERATURE_ALERTS and DISABLE_CAPACITY_ALERTS come from
+# renogy.maintenance in config.json. They are loaded in _load_thresholds()
+# below, so a SIGHUP applies a change without a restart.
 # ============================================================================
 
 # Serial port
@@ -96,6 +88,15 @@ def _load_thresholds():
     global EMAIL_COOLDOWN_MINUTES, EMAIL_REMINDER_HOURS
     global LOW_VOLTAGE_SUSTAINED_SECONDS, LOW_VOLTAGE_CLEAR_HYSTERESIS_V
 
+    global DISABLE_EMAILS, DISABLE_LOW_BATTERY_ALERTS, DISABLE_FAULT_ALERTS
+    global DISABLE_TEMPERATURE_ALERTS, DISABLE_CAPACITY_ALERTS
+
+    DISABLE_EMAILS             = bool(get_config('renogy.maintenance.disable_emails', False))
+    DISABLE_LOW_BATTERY_ALERTS = bool(get_config('renogy.maintenance.disable_low_battery_alerts', False))
+    DISABLE_FAULT_ALERTS       = bool(get_config('renogy.maintenance.disable_fault_alerts', False))
+    DISABLE_TEMPERATURE_ALERTS = bool(get_config('renogy.maintenance.disable_temperature_alerts', False))
+    DISABLE_CAPACITY_ALERTS    = bool(get_config('renogy.maintenance.disable_capacity_alerts', False))
+
     LOW_BATTERY_VOLTAGE_THRESHOLD         = get_config('renogy.thresholds.low_battery_voltage', 12.8)
     LOW_VOLTAGE_SUSTAINED_SECONDS         = get_config('renogy.thresholds.low_battery_voltage_sustained_seconds', 600)
     LOW_VOLTAGE_CLEAR_HYSTERESIS_V        = get_config('renogy.thresholds.low_battery_voltage_clear_hysteresis_v', 0.2)
@@ -124,7 +125,11 @@ CONNECTION_TIMEOUT_MINUTES = get_config('renogy.connection.timeout_minutes', 10)
 # LOGGING CONFIGURATION
 # ============================================================================
 
+# force=True: load_config()/validate_config() above already logged, which makes
+# logging install a default handler; without force this call would do nothing
+# and the log file would stay empty.
 logging.basicConfig(
+    force=True,
     level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
@@ -180,19 +185,46 @@ alert_manager.load()
 # SIGHUP HANDLER - reload config without restart
 # ============================================================================
 
+_reload_requested = False
+
+
 def _sighup_handler(signum, frame):
+    # Only set a flag. Reloading here would take the config lock, and the main
+    # thread this handler interrupts may already hold it (a deadlock). The main
+    # loop calls apply_pending_reload().
+    global _reload_requested
+    _reload_requested = True
+
+
+def apply_pending_reload():
+    """Reload config.json if a SIGHUP asked for it. Returns True if it reloaded."""
+    global _reload_requested
+    if not _reload_requested:
+        return False
+    _reload_requested = False
     logging.warning("SIGHUP received: reloading config")
-    if reload_config():
-        _load_thresholds()
-        # Update AlertManager cooldown/reminder from new config
-        alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
-        alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours', 12)
-        soc_est.configure(get_config('renogy.soc_estimator', {}))
-        logging.warning("Config reloaded and thresholds updated")
-    else:
+    if not reload_config():
         logging.error("Config reload failed")
+        return False
+    _load_thresholds()
+    # Update AlertManager cooldown/reminder from new config
+    alert_manager._cooldown_minutes = get_config('alerts.email_cooldown_minutes', 60)
+    alert_manager._reminder_hours   = get_config('alerts.email_reminder_hours', 12)
+    soc_est.configure(get_config('renogy.soc_estimator', {}))
+    logging.warning(
+        f"Config reloaded and thresholds updated "
+        f"(maintenance flags on: {', '.join(_maintenance_flags()) or 'none'})")
+    return True
 
 signal.signal(signal.SIGHUP, _sighup_handler)
+
+
+def _maintenance_flags():
+    """Names of the maintenance flags that are currently on."""
+    flags = (('EMAILS', DISABLE_EMAILS), ('LOW BATTERY ALERTS', DISABLE_LOW_BATTERY_ALERTS),
+             ('FAULT ALERTS', DISABLE_FAULT_ALERTS), ('TEMPERATURE ALERTS', DISABLE_TEMPERATURE_ALERTS),
+             ('CAPACITY ALERTS', DISABLE_CAPACITY_ALERTS))
+    return [name for name, on in flags if on]
 
 
 def _sigterm_handler(signum, frame):
@@ -584,7 +616,8 @@ def update_daily_summary(metrics):
     if metrics is None:
         return
     if metrics.get('daily_power_generation_kwh') is not None:
-        daily_summary.update('solar_kwh', metrics['daily_power_generation_kwh'])
+        # The controller's daily figure accumulates and resets at its own midnight
+        daily_summary.update_total('solar_kwh', metrics['daily_power_generation_kwh'])
     if metrics.get('battery_soc') is not None:
         daily_summary.update('battery_soc', metrics['battery_soc'])
     if metrics.get('solar_input_power') is not None:
@@ -603,7 +636,7 @@ def check_daily_summary():
         1 for s in alert_manager.all_states().values() if s.get('active', False)
     )
 
-    solar_kwh_today    = daily_summary.get_sum('solar_kwh')
+    solar_kwh_period   = daily_summary.get_total('solar_kwh')
     soc_min            = daily_summary.get_min('battery_soc')
     soc_max            = daily_summary.get_max('battery_soc')
     soc_avg            = daily_summary.get_avg('battery_soc')
@@ -626,7 +659,7 @@ def check_daily_summary():
         f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Generated: {datetime.now().strftime('%H:%M:%S')}\n\n"
         f"Solar Generation:\n"
-        f"  Today's generation: {_fmt(solar_kwh_today, '.4f')} kWh\n"
+        f"  Generated:          {_fmt(solar_kwh_period, '.3f')} kWh since the last summary\n"
         f"  Peak solar power:   {_fmt(solar_power_max, '.0f')} W\n\n"
         f"Battery:\n"
         f"  SOC min:  {_fmt(soc_min)}%\n"
@@ -1259,6 +1292,11 @@ if get_config('watchdog.enabled', False):
 
 try:
     while True:
+        try:
+            apply_pending_reload()
+        except Exception as e:
+            logging.error(f"Config reload failed: {e}")
+
         metrics = read_rover_metrics()
 
         if metrics:

@@ -5,6 +5,13 @@
     "battery_capacity_ah": 50,
     "battery_nominal_voltage": 12.8,
     "battery_chemistry": "lifepo4",
+    "maintenance": {
+      "disable_emails": false,
+      "disable_low_battery_alerts": false,
+      "disable_fault_alerts": false,
+      "disable_temperature_alerts": false,
+      "disable_capacity_alerts": false
+    },
     "soc_estimator": {
       "enabled": true,
       "state_file": "/var/lib/renogy/soc_estimator.json",
@@ -105,7 +112,6 @@
     },
     "humidity_alerts": {
       "warning_pct": 80,
-      "critical_pct": 85,
       "emergency_pct": 90
     },
     "aeration": {
@@ -127,7 +133,6 @@
     "battery_load_shedding": {
       "disable_threshold_pct": 30,
       "reduce_threshold_pct": 50,
-      "normal_threshold_pct": 70,
       "skip_pump_test_below_pct": 50,
       "tier_hysteresis_pct": 2
     },
@@ -208,12 +213,14 @@
     "waterflow_alert_state": "/ramdisk/waterflow_alerts.json",
     "renogy_persistent_state": "/var/lib/renogy/renogy_state.json",
     "waterflow_persistent_state": "/var/lib/renogy/waterflow_state.json",
+    "waterflow_pump_state": "/var/lib/renogy/waterflow_pump_state.json",
     "boot_reason_state": "/var/lib/renogy/boot_reasons.json",
     "clean_shutdown_marker": "/var/lib/renogy/clean_shutdown",
     "renogy_log": "/var/log/renogy.log",
     "waterflow_log": "/var/log/waterflow.log",
     "battery_data_file": "/ramdisk/Renogy.prom",
-    "battery_data_timeout_seconds": 60
+    "battery_data_timeout_seconds": 60,
+    "battery_data_boot_grace_seconds": 180
   },
   "watchdog": {
     "enabled": false,
