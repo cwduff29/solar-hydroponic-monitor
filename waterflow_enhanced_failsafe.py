@@ -144,6 +144,15 @@ def _load_pump_test_config():
     return cfg
 
 
+def _positive_factor(key, default):
+    """A flow calibration factor from config; `default` if missing or unusable."""
+    value = get_config(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        logging.error("%s=%r is not a positive number; using %s", key, value, default)
+        return default
+    return value
+
+
 def _load_thresholds():
     """Load/reload all config-driven thresholds into module globals."""
     global NFT_RETURN_EXTREME_TEMP_C, ENABLE_NFT_EXTREME_TEMP_ALERT
@@ -174,6 +183,7 @@ def _load_thresholds():
     global MAX_FLOW_LPM, MAX_SPIKE_MULTIPLIER
     global FLOW_IMBALANCE_PCT, FLOW_IMBALANCE_THRESHOLD, FLOW_IMBALANCE_DURATION
     global FLOW_CALIBRATION_FACTOR, FLOW_MEASUREMENT_DURATION, MIN_FLOW_THRESHOLD
+    global FLOW_CALIBRATION_FACTOR_INLET, FLOW_CALIBRATION_FACTOR_OUTLET
     global FLOW_WARNING_DELAY, FLOW_HISTORY_SIZE, AERATOR_FLOW_SUPPRESS, FLOW_TREND_DROP_PCT
     global DISABLE_EMAILS, DISABLE_PUMP_TESTING, DISABLE_FLOW_ALERTS, DISABLE_AERATOR, DISABLE_FAN
 
@@ -185,7 +195,13 @@ def _load_thresholds():
     DISABLE_FAN          = bool(get_config('waterflow.maintenance.disable_fan',          False))
 
     # Flow sensor
-    FLOW_CALIBRATION_FACTOR   = get_config('waterflow.flow.calibration_factor',            7.5)
+    # Pulses per second per L/min. The shared value applies to both sensors
+    # unless a per-sensor value is set (they rarely match: see README).
+    FLOW_CALIBRATION_FACTOR   = _positive_factor('waterflow.flow.calibration_factor', 7.5)
+    FLOW_CALIBRATION_FACTOR_INLET  = _positive_factor(
+        'waterflow.flow.calibration_factor_inlet',  FLOW_CALIBRATION_FACTOR)
+    FLOW_CALIBRATION_FACTOR_OUTLET = _positive_factor(
+        'waterflow.flow.calibration_factor_outlet', FLOW_CALIBRATION_FACTOR)
     FLOW_MEASUREMENT_DURATION = get_config('waterflow.flow.measurement_duration_seconds',  10)
     MIN_FLOW_THRESHOLD        = get_config('waterflow.flow.min_flow_threshold_lpm',        0.25)
     FLOW_WARNING_DELAY        = get_config('waterflow.flow.warning_delay_seconds',         600)
@@ -1083,8 +1099,8 @@ def monitor_flow(elapsed_s=None):
 
         # Calculate flow rates (L/min)
         duration = elapsed_s if elapsed_s and elapsed_s > 0 else FLOW_MEASUREMENT_DURATION
-        flow_inlet  = snapshot_inlet  / (FLOW_CALIBRATION_FACTOR * duration)
-        flow_outlet = snapshot_outlet / (FLOW_CALIBRATION_FACTOR * duration)
+        flow_inlet  = snapshot_inlet  / (FLOW_CALIBRATION_FACTOR_INLET * duration)
+        flow_outlet = snapshot_outlet / (FLOW_CALIBRATION_FACTOR_OUTLET * duration)
 
         # Suppress flow readings while aerator is on or during settling period after it turns off.
         # The aerator causes air bubbles/turbulence that produce false high readings on both sensors.
@@ -2289,7 +2305,7 @@ def _take_fresh_flow_reading():
     start_flow_measurement()
     time.sleep(FLOW_MEASUREMENT_DURATION + 1)
     pulses, _, elapsed = stop_flow_measurement()
-    return pulses / (FLOW_CALIBRATION_FACTOR * max(elapsed, float(FLOW_MEASUREMENT_DURATION)))
+    return pulses / (FLOW_CALIBRATION_FACTOR_INLET * max(elapsed, float(FLOW_MEASUREMENT_DURATION)))
 
 
 def attempt_pump_recovery():

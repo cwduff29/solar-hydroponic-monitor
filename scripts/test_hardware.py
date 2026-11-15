@@ -391,8 +391,10 @@ def test_flow_sensors(config):
         pass
 
     calibration = get_cfg(config, 'waterflow.flow.calibration_factor', 7.5)
-    inlet_lpm  = (inlet_count[0]  / calibration) if calibration else 0
-    outlet_lpm = (outlet_count[0] / calibration) if calibration else 0
+    cal_inlet  = get_cfg(config, 'waterflow.flow.calibration_factor_inlet',  calibration)
+    cal_outlet = get_cfg(config, 'waterflow.flow.calibration_factor_outlet', calibration)
+    inlet_lpm  = (inlet_count[0]  / cal_inlet)  if cal_inlet  else 0
+    outlet_lpm = (outlet_count[0] / cal_outlet) if cal_outlet else 0
 
     if inlet_count[0] > 0:
         record(

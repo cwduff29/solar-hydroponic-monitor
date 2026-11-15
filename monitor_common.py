@@ -833,6 +833,8 @@ def validate_config():
     # -----------------------------------------------------------------------
     flow_pos_keys = [
         'waterflow.flow.calibration_factor',
+        'waterflow.flow.calibration_factor_inlet',
+        'waterflow.flow.calibration_factor_outlet',
         'waterflow.flow.measurement_duration_seconds',
         'waterflow.flow.min_flow_threshold_lpm',
         'waterflow.flow.imbalance_threshold_lpm',

@@ -205,7 +205,8 @@ class TestBackupPumpTest(PumpTestCase):
         w.run_pump_test(self.pt.ACTION_TEST)
         self.assertEqual(self.emails, ['OK Backup Pump Test PASSED'])
         self.assertEqual(w.pump_state['last_result'], 'pass')
-        self.assertAlmostEqual(w.pump_state['good_backup_flow_lpm'], 127 / 75, places=2)
+        self.assertAlmostEqual(w.pump_state['good_backup_flow_lpm'],
+                               127 / (w.FLOW_CALIBRATION_FACTOR_INLET * 10), places=2)
         self.assertTrue(self.main_on())
         self.assertFalse(self.backup_on())
         with open(w.PUMP_STATE_FILE) as f:
@@ -226,7 +227,8 @@ class TestBackupPumpTest(PumpTestCase):
         with open(w.PROM_OUTPUT_FILE) as f:
             text = f.read()
         self.assertIn('waterflow_backup_pump_test_result{source="waterflow"} 0', text)
-        self.assertIn('waterflow_backup_pump_test_flow_lpm{source="waterflow"} 1.693', text)
+        expected = 127 / (w.FLOW_CALIBRATION_FACTOR_INLET * 10)
+        self.assertIn('waterflow_backup_pump_test_flow_lpm{source="waterflow"} %.3f' % expected, text)
 
     def test_recheck_with_dead_main_stays_on_backup(self):
         w = self.w

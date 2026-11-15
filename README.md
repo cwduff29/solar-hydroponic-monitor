@@ -159,7 +159,7 @@ Key sections:
 |---------|---------|
 | `renogy.thresholds` | Battery voltage/SOC/temperature alert levels (voltage is compared at rest, sustained) |
 | `renogy.soc_estimator` | SOC estimator parameters (internal resistance, anchors, persistence) |
-| `waterflow.flow` | Flow sensor calibration, min threshold, leak detection |
+| `waterflow.flow` | Flow sensor calibration (`calibration_factor`, or `calibration_factor_inlet` / `calibration_factor_outlet` per sensor), min threshold, leak detection |
 | `waterflow.temperature` | Temperature alert thresholds (°C) |
 | `waterflow.battery_load_shedding` | SOC thresholds for aeration load shedding (+ tier hysteresis) |
 | `waterflow.main_pump_low_soc` | Optional low-SOC main pump tiers (`enabled: false` by default) |

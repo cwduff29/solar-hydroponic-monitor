@@ -59,17 +59,17 @@ class TestFlowWindow(WaterflowCase):
         self.assertAlmostEqual(elapsed, 12.7)
         self.assertFalse(w.flow_measurement_active)
         w.monitor_flow(elapsed)
-        expected = 127 / (w.FLOW_CALIBRATION_FACTOR * 12.7)
+        expected = 127 / (w.FLOW_CALIBRATION_FACTOR_INLET * 12.7)
         self.assertAlmostEqual(w.flow_history_inlet[-1], expected, places=6)
         # Dividing by the nominal 10 s would have over-read by 27 %
-        self.assertLess(w.flow_history_inlet[-1], 127 / (w.FLOW_CALIBRATION_FACTOR * 10) * 0.8)
+        self.assertLess(w.flow_history_inlet[-1], 127 / (w.FLOW_CALIBRATION_FACTOR_INLET * 10) * 0.8)
 
     def test_no_window_given_assumes_the_nominal_duration(self):
         w = self.w
         w.count_inlet = w.count_outlet = 75
         w.monitor_flow()
         self.assertAlmostEqual(w.flow_history_inlet[-1],
-                               75 / (w.FLOW_CALIBRATION_FACTOR * w.FLOW_MEASUREMENT_DURATION))
+                               75 / (w.FLOW_CALIBRATION_FACTOR_INLET * w.FLOW_MEASUREMENT_DURATION))
 
     def test_fresh_reading_uses_its_own_window_and_stops_counting(self):
         w = self.w
@@ -80,7 +80,7 @@ class TestFlowWindow(WaterflowCase):
 
         with mock.patch.object(w.time, 'sleep', sleep):
             flow = w._take_fresh_flow_reading()
-        self.assertAlmostEqual(flow, 165 / (w.FLOW_CALIBRATION_FACTOR * 11))   # 2.0 L/min
+        self.assertAlmostEqual(flow, 165 / (w.FLOW_CALIBRATION_FACTOR_INLET * 11))   # 2.0 L/min
         self.assertFalse(w.flow_measurement_active)
 
 
@@ -188,6 +188,46 @@ class TestReloadableSettings(WaterflowCase):
                            'waterflow.flow.calibration_factor': 8.1})
         self.assertEqual((w.MIN_FLOW_THRESHOLD, w.FLOW_WARNING_DELAY, w.FLOW_CALIBRATION_FACTOR),
                          (0.4, 300, 8.1))
+
+    def test_sensors_follow_the_shared_factor_without_their_own(self):
+        w = self.w
+        real = w.get_config
+
+        def cfg(key, default=None):
+            if key == 'waterflow.flow.calibration_factor':
+                return 8.1
+            if key.startswith('waterflow.flow.calibration_factor_'):
+                return default                     # key absent from the config
+            return real(key, default)
+        with mock.patch.object(w, 'get_config', cfg):
+            w._load_thresholds()
+        self.assertEqual((w.FLOW_CALIBRATION_FACTOR_INLET, w.FLOW_CALIBRATION_FACTOR_OUTLET),
+                         (8.1, 8.1))
+
+    def test_each_flow_sensor_can_have_its_own_calibration_factor(self):
+        w = self.w
+        self._reload_with({'waterflow.flow.calibration_factor': 7.5,
+                           'waterflow.flow.calibration_factor_inlet': 5.0,
+                           'waterflow.flow.calibration_factor_outlet': 10.0})
+        try:
+            w.flow_history_inlet.clear(); w.flow_history_outlet.clear()
+            with w._flow_lock:
+                w.count_inlet, w.count_outlet = 100, 100
+            w.monitor_flow(elapsed_s=10.0)
+            self.assertAlmostEqual(w.flow_history_inlet[-1], 2.0)
+            self.assertAlmostEqual(w.flow_history_outlet[-1], 1.0)
+        finally:
+            self._reload_with({})
+
+    def test_bad_per_sensor_factor_falls_back_to_shared(self):
+        w = self.w
+        try:
+            with self.assertLogs(level='ERROR'):
+                self._reload_with({'waterflow.flow.calibration_factor': 7.5,
+                                   'waterflow.flow.calibration_factor_inlet': 0})
+            self.assertEqual(w.FLOW_CALIBRATION_FACTOR_INLET, 7.5)
+        finally:
+            self._reload_with({})
 
     def test_renogy_maintenance_flags_are_in_config(self):
         with open(os.path.join(os.path.dirname(__file__), '..', 'config.json')) as f:
