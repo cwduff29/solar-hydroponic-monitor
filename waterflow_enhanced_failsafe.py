@@ -38,8 +38,10 @@ import threading
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
+import logging
 
 import load_shedding
+import pump_test
 from monitor_common import (
     AlertManager,
     send_email,
@@ -123,6 +125,25 @@ BME280_PERMISSION_WAIT_SECONDS = get_config('waterflow.bme280.permission_wait_se
 # THRESHOLD LOADING (reloaded on SIGHUP)
 # ============================================================================
 
+def _load_pump_test_config():
+    """Backup pump test settings (waterflow.pump_test) merged over pump_test.DEFAULTS."""
+    raw = dict(get_config('waterflow.pump_test', {}) or {})
+    if raw.get('min_soc_pct') is None:
+        # Older configs only have this limit, under battery_load_shedding
+        raw['min_soc_pct'] = get_config('waterflow.battery_load_shedding.skip_pump_test_below_pct', None)
+    cfg = pump_test.config(raw)
+    window = cfg['test_window_hours']
+    valid = (isinstance(window, (list, tuple)) and len(window) == 2
+             and all(isinstance(h, int) and not isinstance(h, bool) for h in window)
+             and 0 <= window[0] < window[1] <= 24)
+    if not valid:
+        default = list(pump_test.DEFAULTS['test_window_hours'])
+        logging.error(f"waterflow.pump_test.test_window_hours={window!r} is not [start_hour, end_hour] "
+                      f"with 0 <= start < end <= 24; using {default}")
+        cfg['test_window_hours'] = default
+    return cfg
+
+
 def _load_thresholds():
     """Load/reload all config-driven thresholds into module globals."""
     global NFT_RETURN_EXTREME_TEMP_C, ENABLE_NFT_EXTREME_TEMP_ALERT
@@ -135,14 +156,14 @@ def _load_thresholds():
     global HUMIDITY_WARNING, HUMIDITY_EMERGENCY
     global BATTERY_THRESHOLD_DISABLE, BATTERY_THRESHOLD_REDUCE
     global BATTERY_TIER_HYSTERESIS, MAIN_PUMP_LOW_SOC_CFG
-    global BATTERY_SKIP_PUMP_TEST_BELOW
+    global PUMP_TEST_CFG
     global AERATION_ON_DURATION, AERATION_OFF_DURATION
     global AERATION_ON_DURATION_REDUCED, AERATION_OFF_DURATION_REDUCED
     global AERATION_TIER_HOT_ON, AERATION_TIER_HOT_OFF
     global AERATION_TIER_WARM_ON, AERATION_TIER_WARM_OFF
     global AERATION_TIER_MODERATE_ON, AERATION_TIER_MODERATE_OFF
     global AERATION_TIER_COOL_ON, AERATION_TIER_COOL_OFF
-    global PUMP_TEST_INTERVAL, PUMP_TEST_DURATION
+    global PUMP_TEST_DURATION
     global PUMP_CYCLE_PAUSE, PUMP_RECOVERY_WAIT, PUMP_CYCLE_MAX_ATTEMPTS
     global BATTERY_DATA_FILE, BATTERY_DATA_TIMEOUT, BATTERY_DATA_BOOT_GRACE
     global MAIN_PUMP_TARGET_FLOW, MAIN_PUMP_FLOW_KP, MAIN_PUMP_FLOW_DEADBAND, MAIN_PUMP_FLOW_MAX_STEP
@@ -203,7 +224,6 @@ def _load_thresholds():
     # Battery load shedding
     BATTERY_THRESHOLD_DISABLE      = get_config('waterflow.battery_load_shedding.disable_threshold_pct', 30)
     BATTERY_THRESHOLD_REDUCE       = get_config('waterflow.battery_load_shedding.reduce_threshold_pct',  50)
-    BATTERY_SKIP_PUMP_TEST_BELOW   = get_config('waterflow.battery_load_shedding.skip_pump_test_below_pct', 50)
     BATTERY_TIER_HYSTERESIS        = get_config('waterflow.battery_load_shedding.tier_hysteresis_pct', 2)
 
     # Main pump low-SOC power saving (both tiers disabled by default)
@@ -226,7 +246,7 @@ def _load_thresholds():
     AERATION_TIER_COOL_OFF     = get_config('waterflow.aeration.temp_tiers.cool_off_seconds',    2160)
 
     # Pump testing
-    PUMP_TEST_INTERVAL    = get_config('waterflow.pump.test_interval_seconds',   172800)
+    PUMP_TEST_CFG         = _load_pump_test_config()   # schedule and grading (pump_test.py)
     PUMP_TEST_DURATION    = get_config('waterflow.pump.test_duration_seconds',       60)
     PUMP_CYCLE_PAUSE      = get_config('waterflow.pump.cycle_pause_seconds',          5)
     PUMP_RECOVERY_WAIT    = get_config('waterflow.pump.recovery_wait_seconds',       90)
@@ -286,7 +306,6 @@ TEMP_DIFF_TRACKING_ENABLED = True  # Track in Prometheus for analysis
 # LOGGING (ERROR LEVEL ONLY)
 # ============================================================================
 
-import logging
 # force=True: load_config()/validate_config() above already logged, which makes
 # logging install a default handler; without force this call would do nothing
 # and the log file would stay empty.
@@ -457,8 +476,9 @@ battery_soc = 100.0
 battery_soc_confidence = None    # SOC estimator confidence (0-1) from Renogy.prom
 renogy_controller_temp_c = None  # Controller temp from Renogy.prom (BME280 fallback)
 
-# Pump testing
-last_pump_test = 0
+# Pump testing and failover: schedule, last results and the failover flag
+# (see pump_test.py). load_state() replaces this at startup.
+pump_state = pump_test.new_state(time.time())
 
 # Pump recovery state
 recovery_attempted = False
@@ -2078,134 +2098,180 @@ def check_humidity_alerts(conditions):
 # PUMP TESTING
 # ============================================================================
 
-_last_pump_test_skip_log = None
+_PUMP_TEST_QUIET_REASONS = ('test not due', 'retest not due yet',
+                            'main pump recheck not due', 'outside test window')
 
 
-def should_run_pump_test():
-    """Check if backup pump test is due"""
-    global _last_pump_test_skip_log
+def next_pump_test_action():
+    """Which pump test should run now: one of pump_test.ACTION_* or None.
 
+    pump_test.decide() holds the schedule and the preconditions; this hands it
+    the controller's current view of the system.
+    """
     if DISABLE_PUMP_TESTING:
-        return False
+        return None
 
-    if last_pump_test == 0:
-        return False
-
-    if time.time() - last_pump_test <= PUMP_TEST_INTERVAL:
-        return False
-
-    # A routine test switches the main pump off and on again: not during a
-    # low-flow episode (recovery owns the pumps) or a planned low-SOC OFF window.
-    if not backup_pump_active and (low_flow_start_time is not None or main_pump_planned_off):
-        return False
-
-    # Skip the test if battery SOC is unknown or too low (#14); log at most hourly while overdue
-    soc = read_battery_soc()
-    if soc is None or soc < BATTERY_SKIP_PUMP_TEST_BELOW:
-        if _last_pump_test_skip_log is None or _now() - _last_pump_test_skip_log >= 3600:
-            reason = ("battery SOC unknown" if soc is None else
-                      f"battery SOC {soc:.1f}% < {BATTERY_SKIP_PUMP_TEST_BELOW}% (threshold)")
-            logging.warning(f"Skipping pump test: {reason}")
-            _last_pump_test_skip_log = _now()
-        return False
-
-    return True
+    main_flow_ok = (smoothed_flow_inlet >= MIN_FLOW_THRESHOLD
+                    and low_flow_start_time is None
+                    and not main_pump_planned_off)
+    flow_alert = any(alert_manager.is_active(a) for a in _FLOW_ALERT_TYPES)
+    action, reason = pump_test.decide(
+        time.time(), pump_state, PUMP_TEST_CFG,
+        uptime_s=_system_uptime_seconds(),
+        backup_active=backup_pump_active,
+        main_flow_ok=main_flow_ok,
+        flow_alert_active=flow_alert,
+        soc=read_battery_soc(),
+        soc_confidence=battery_soc_confidence,
+    )
+    if action is None and reason not in _PUMP_TEST_QUIET_REASONS and not reason.startswith('uptime'):
+        # Due, but a precondition is holding it back: say why, at most hourly
+        _log_throttled('pump_test_wait', f"Pump test is due but waiting: {reason}", interval=3600)
+    return action
 
 
-def test_backup_pump():
-    """
-    Test backup pump functionality, or recheck main pump if currently in failover.
-    """
-    global last_pump_test, backup_pump_active
+def _pump_test_window_text():
+    start, end = PUMP_TEST_CFG['test_window_hours']
+    return f"{start:02d}:00-{end:02d}:00"
 
-    if backup_pump_active:
-        logging.info("Pump test: in failover mode - rechecking main pump")
 
-        set_backup_pump(False)
-        time.sleep(PUMP_CYCLE_PAUSE)
-        set_main_pump(True)
-
-        # Let the flow settle, then measure it: smoothed_flow_inlet cannot
-        # update while this function blocks the main loop.
-        time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
-        test_flow = _take_fresh_flow_reading()
-
-        if test_flow >= MIN_FLOW_THRESHOLD:
-            backup_pump_active = False
-            alert_manager.clear('backup_pump_failover')
-            alert_manager.clear('pump_recovery_failed')
-            logging.warning(
-                f"Pump test: main pump recovered ({test_flow:.3f} L/min) - "
-                f"switched back from backup"
-            )
-            send_email_alert(
-                "Main Pump Recovered - Failover Cleared",
-                f"The scheduled pump test found the main pump is working again.\n"
-                f"System has switched back to the main pump.\n\n"
-                f"Flow during test: {test_flow:.3f} L/min\n"
-                f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"No further action required. Next pump test in "
-                f"{PUMP_TEST_INTERVAL/3600:.0f} hours."
-            )
-        else:
-            set_main_pump(False)
-            time.sleep(PUMP_CYCLE_PAUSE)
-            set_backup_pump(True)
-            logging.warning(
-                f"Pump test: main pump still failing ({test_flow:.3f} L/min) - "
-                f"returned to backup"
-            )
-            send_email_alert(
-                "Main Pump Still Failing - Remaining on Backup",
-                f"The scheduled pump recheck found the main pump is still not working.\n"
-                f"System has returned to the backup pump.\n\n"
-                f"Flow during test: {test_flow:.3f} L/min\n"
-                f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"Main pump requires manual inspection.\n"
-                f"Next recheck in {PUMP_TEST_INTERVAL/3600:.0f} hours."
-            )
-
+def run_pump_test(action):
+    """Run the pump test chosen by next_pump_test_action() and save the result."""
+    if action == pump_test.ACTION_RECHECK:
+        _recheck_main_pump()
     else:
-        logging.info("Starting backup pump test")
+        _test_backup_pump(action)
+    save_state()
 
+
+def _recheck_main_pump():
+    """In failover: try the main pump again and switch back if it delivers."""
+    global backup_pump_active
+
+    logging.warning("Pump test: in failover mode - rechecking main pump")
+    recheck_hours = PUMP_TEST_CFG['failover_recheck_interval_seconds'] / 3600
+
+    set_backup_pump(False)
+    time.sleep(PUMP_CYCLE_PAUSE)
+    set_main_pump(True)
+
+    # Let the flow settle, then measure it: smoothed_flow_inlet cannot
+    # update while this function blocks the main loop.
+    time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
+    test_flow = _take_fresh_flow_reading()
+    now = time.time()
+    pump_state['last_recheck_ts'] = now
+
+    if test_flow >= MIN_FLOW_THRESHOLD:
+        backup_pump_active = False
+        pump_test.set_failover(pump_state, False, now)
+        alert_manager.clear('backup_pump_failover')
+        alert_manager.clear('pump_recovery_failed')
+        logging.warning(
+            f"Pump test: main pump recovered ({test_flow:.3f} L/min) - "
+            f"switched back from backup"
+        )
+        send_email_alert(
+            "Main Pump Recovered - Failover Cleared",
+            f"The scheduled recheck found the main pump is working again.\n"
+            f"System has switched back to the main pump.\n\n"
+            f"Flow during test: {test_flow:.3f} L/min\n"
+            f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"No further action required. Routine backup pump tests resume."
+        )
+    else:
         set_main_pump(False)
         time.sleep(PUMP_CYCLE_PAUSE)
         set_backup_pump(True)
-
-        # Let the flow settle, then measure it: smoothed_flow_inlet cannot
-        # update while this function blocks the main loop.
-        time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
-        test_flow = _take_fresh_flow_reading()
-
-        set_backup_pump(False)
-        time.sleep(PUMP_CYCLE_PAUSE)
-        set_main_pump(True)
-
-        if test_flow >= MIN_FLOW_THRESHOLD:
-            result = "PASSED"
-            status = "OK"
-            if alert_manager.clear('pump_recovery_failed'):
-                logging.warning(
-                    "pump_recovery_failed cleared by routine backup pump test: "
-                    f"backup pump flow {test_flow:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min"
-                )
-        else:
-            result = "FAILED"
-            status = "FAIL"
-
+        logging.warning(
+            f"Pump test: main pump still failing ({test_flow:.3f} L/min) - "
+            f"returned to backup"
+        )
         send_email_alert(
-            f"{status} Backup Pump Test {result}",
-            f"Backup pump test completed.\n"
-            f"Result: {result}\n"
+            "Main Pump Still Failing - Remaining on Backup",
+            f"The scheduled recheck found the main pump is still not working.\n"
+            f"System has returned to the backup pump.\n\n"
             f"Flow during test: {test_flow:.3f} L/min\n"
             f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
-            f"Next test in: {PUMP_TEST_INTERVAL/3600:.0f} hours"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"Main pump requires manual inspection.\n"
+            f"Next recheck in about {recheck_hours:.0f} hours ({_pump_test_window_text()})."
         )
 
-    last_pump_test = time.time()
-    save_state()
+
+def _test_backup_pump(action):
+    """Routine test (or retest) of the backup pump: run it alone, measure, grade."""
+    retest = action == pump_test.ACTION_RETEST
+    logging.warning(f"Starting backup pump {'retest' if retest else 'test'}")
+
+    set_main_pump(False)
+    time.sleep(PUMP_CYCLE_PAUSE)
+    set_backup_pump(True)
+
+    # Let the flow settle, then measure it: smoothed_flow_inlet cannot
+    # update while this function blocks the main loop.
+    time.sleep(max(0, PUMP_TEST_DURATION - (FLOW_MEASUREMENT_DURATION + 1)))
+    test_flow = _take_fresh_flow_reading()
+
+    set_backup_pump(False)
+    time.sleep(PUMP_CYCLE_PAUSE)
+    set_main_pump(True)
+
+    baseline = pump_state.get('good_backup_flow_lpm')      # from the last PASS, before this test
+    result = pump_test.grade(test_flow, pump_state, PUMP_TEST_CFG, MIN_FLOW_THRESHOLD)
+    final = pump_test.record_test(pump_state, time.time(), action, result, test_flow, PUMP_TEST_CFG)
+    logging.warning(f"Backup pump {'retest' if retest else 'test'}: {result.upper()} "
+                    f"({test_flow:.3f} L/min, threshold {MIN_FLOW_THRESHOLD} L/min)")
+
+    interval_days = PUMP_TEST_CFG['test_interval_seconds'] / 86400
+    details = (
+        f"Flow during test: {test_flow:.3f} L/min\n"
+        f"Threshold: {MIN_FLOW_THRESHOLD} L/min\n"
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    )
+    next_test = f"Next routine test in about {interval_days:.0f} days ({_pump_test_window_text()})."
+
+    if result == pump_test.RESULT_FAIL and not final:
+        retest_min = PUMP_TEST_CFG['retest_delay_seconds'] / 60
+        send_email_alert(
+            f"Backup Pump Test FAILED - Retest in {retest_min:.0f} min",
+            f"The backup pump did not deliver enough flow in its routine test.\n"
+            f"It will be tested once more in {retest_min:.0f} minutes (an air lock can clear);\n"
+            f"only a second failure is treated as final.\n\n" + details
+        )
+        return
+
+    if result == pump_test.RESULT_FAIL:
+        alert_manager.should_send('backup_pump_test_failed')      # marks the alert active
+        send_email_alert(
+            "FAIL Backup Pump Test FAILED",
+            f"The backup pump failed its test and the retest.\n"
+            f"If the main pump fails, there is no working backup.\n\n" + details +
+            f"\nInspect the backup pump, its relay and its intake.\n" + next_test
+        )
+        alert_manager.mark_sent('backup_pump_test_failed')
+        return
+
+    alert_manager.clear('backup_pump_test_failed')
+    if alert_manager.clear('pump_recovery_failed'):
+        logging.warning(
+            "pump_recovery_failed cleared by backup pump test: "
+            f"backup pump flow {test_flow:.3f} L/min >= {MIN_FLOW_THRESHOLD} L/min"
+        )
+    if result == pump_test.RESULT_WARN:
+        send_email_alert(
+            "WARN Backup Pump Test: Flow Lower Than Before",
+            f"The backup pump works, but delivers much less than at its last good test.\n\n" + details +
+            f"Last good test: {baseline:.3f} L/min "
+            f"(warning below {PUMP_TEST_CFG['backup_degraded_ratio'] * 100:.0f}% of that)\n\n"
+            f"Check the backup pump intake and tubing for a partial blockage.\n" + next_test
+        )
+    else:
+        send_email_alert(
+            "OK Backup Pump Test PASSED",
+            f"Backup pump test completed.\nResult: PASSED\n" + details + next_test
+        )
 
 # ============================================================================
 # PUMP RECOVERY
@@ -2280,6 +2346,8 @@ def attempt_pump_recovery():
     time.sleep(PUMP_CYCLE_PAUSE)
     set_backup_pump(True)
     backup_pump_active = True
+    # Starts the recheck clock (first main-pump recheck a full interval from now)
+    pump_test.set_failover(pump_state, True, time.time())
     save_state()
 
     time.sleep(PUMP_RECOVERY_WAIT)
@@ -2327,63 +2395,51 @@ def attempt_pump_recovery():
 # STATE PERSISTENCE
 # ============================================================================
 
-_saved_pump_state = None   # what save_state() last wrote
+_saved_pump_state = None   # copy of what save_state() last wrote
 
 
 def load_state():
-    """Load the pump state (failover flag, last pump test time) from PUMP_STATE_FILE.
+    """Load the pump state (failover flag, test history) from PUMP_STATE_FILE.
 
     Called after setup_gpio(): if the system was on the backup pump, it goes
     straight back to it instead of retrying the failed main pump.
     """
-    global last_pump_test, backup_pump_active, _saved_pump_state
+    global pump_state, backup_pump_active, _saved_pump_state
 
-    try:
-        with open(PUMP_STATE_FILE, 'r') as f:
-            state = json.load(f)
-        last_pump_test = float(state.get('last_pump_test') or time.time())
-        backup_pump_active = bool(state.get('backup_pump_active', False))
-        _saved_pump_state = {'last_pump_test': last_pump_test,
-                             'backup_pump_active': backup_pump_active}
-        if backup_pump_active:
-            set_main_pump(False)
-            set_backup_pump(True)
-            logging.warning(
-                "Restart while on backup pump failover - "
-                "main pump remains off pending manual inspection"
-            )
-    except FileNotFoundError:
-        last_pump_test = time.time()    # first run: the pump-test interval starts now
-    except Exception as e:
-        logging.error(f"Failed to load pump state from {PUMP_STATE_FILE}: {e}")
-        last_pump_test = time.time()
+    if os.path.exists(PUMP_STATE_FILE):
+        try:
+            with open(PUMP_STATE_FILE) as f:
+                json.load(f)
+        except (OSError, ValueError) as e:
+            logging.error(f"Pump state file {PUMP_STATE_FILE} is unreadable ({e}); starting fresh")
 
+    # A missing or unreadable file gives a fresh state: main pump, never tested
+    pump_state = pump_test.load_state(PUMP_STATE_FILE, time.time())
+    backup_pump_active = bool(pump_state.get('backup_pump_active'))
+    if backup_pump_active:
+        set_main_pump(False)
+        set_backup_pump(True)
+        logging.warning(
+            "Restart while on backup pump failover - "
+            "main pump remains off pending manual inspection"
+        )
+
+    _saved_pump_state = None      # write once per start (also converts an older file)
     save_state()
 
 
 def save_state():
-    """Write the pump state to PUMP_STATE_FILE if it changed (atomic, fsynced).
-
-    last_pump_test is wall-clock time on purpose: it has to survive reboots.
-    """
+    """Write the pump state to PUMP_STATE_FILE if it changed (atomic, fsynced)."""
     global _saved_pump_state
 
-    state = {'last_pump_test': last_pump_test, 'backup_pump_active': backup_pump_active}
-    if state == _saved_pump_state:
+    pump_state['backup_pump_active'] = backup_pump_active
+    if pump_state == _saved_pump_state:
         return      # nothing new: no SD card write
 
     try:
-        directory = os.path.dirname(PUMP_STATE_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = PUMP_STATE_FILE + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(dict(state, last_save=time.time()), f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, PUMP_STATE_FILE)
-        _saved_pump_state = state
-    except Exception as e:
+        pump_test.save_state(PUMP_STATE_FILE, pump_state)
+        _saved_pump_state = dict(pump_state)
+    except OSError as e:
         logging.error(f"Failed to save pump state to {PUMP_STATE_FILE}: {e}")
 
 # ============================================================================
@@ -2637,6 +2693,21 @@ def write_prometheus_metrics(temps=None, conditions=None):
             f.write("# TYPE battery_soc_percent gauge\n")
             f.write(f"battery_soc_percent{{source=\"waterflow\"}} {battery_soc:.1f}\n")
 
+            # Backup pump test (pump_test.py): last result, if there has been a test
+            if pump_state.get('last_result') in pump_test.RESULTS:
+                f.write("# HELP waterflow_backup_pump_test_result Last backup pump test (0=pass, 1=warn, 2=fail)\n")
+                f.write("# TYPE waterflow_backup_pump_test_result gauge\n")
+                f.write(f"waterflow_backup_pump_test_result{{source=\"waterflow\"}} "
+                        f"{pump_test.RESULTS.index(pump_state['last_result'])}\n")
+                f.write("# HELP waterflow_backup_pump_test_flow_lpm Backup pump flow in its last test\n")
+                f.write("# TYPE waterflow_backup_pump_test_flow_lpm gauge\n")
+                f.write(f"waterflow_backup_pump_test_flow_lpm{{source=\"waterflow\"}} "
+                        f"{pump_state.get('last_backup_flow_lpm') or 0:.3f}\n")
+                f.write("# HELP waterflow_backup_pump_test_timestamp_seconds When the backup pump was last tested\n")
+                f.write("# TYPE waterflow_backup_pump_test_timestamp_seconds gauge\n")
+                f.write(f"waterflow_backup_pump_test_timestamp_seconds{{source=\"waterflow\"}} "
+                        f"{int(pump_state.get('last_test_ts') or 0)}\n")
+
             # Health metrics
             f.write("# HELP waterflow_monitor_healthy Monitor health status\n")
             f.write("# TYPE waterflow_monitor_healthy gauge\n")
@@ -2813,6 +2884,9 @@ def main():
     _discover_and_cache_sensors()
     print(f"Temperature sensors: {len(_ds18b20_sensor_cache)}")
     print(f"Initial battery SOC: {battery_soc:.1f}%")
+    print(f"Backup pump test: every {PUMP_TEST_CFG['test_interval_seconds'] / 86400:.0f} days, "
+          f"{_pump_test_window_text()}; last result: {pump_state.get('last_result') or 'never tested'}; "
+          f"on backup pump: {backup_pump_active}")
     print()
 
     # Load alert state
@@ -2912,9 +2986,14 @@ def main():
 
             # Pump test check every 60 seconds
             if minute_due:
-                if should_run_pump_test():
+                try:
+                    pump_action = next_pump_test_action()
+                except Exception as e:
+                    logging.error(f"Pump test scheduling failed: {e}")
+                    pump_action = None
+                if pump_action:
                     try:
-                        test_backup_pump()
+                        run_pump_test(pump_action)
                     except Exception as e:
                         logging.error(f"Pump test failed: {e}")
                     finally:

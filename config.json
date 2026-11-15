@@ -133,7 +133,6 @@
     "battery_load_shedding": {
       "disable_threshold_pct": 30,
       "reduce_threshold_pct": 50,
-      "skip_pump_test_below_pct": 50,
       "tier_hysteresis_pct": 2
     },
     "main_pump_low_soc": {
@@ -155,8 +154,17 @@
         "restart_grace_seconds": 60
       }
     },
+    "pump_test": {
+      "test_interval_seconds": 604800,
+      "test_window_hours": [10, 15],
+      "failover_recheck_interval_seconds": 86400,
+      "retest_delay_seconds": 3600,
+      "backup_degraded_ratio": 0.5,
+      "min_uptime_seconds": 3600,
+      "min_soc_pct": 50,
+      "min_soc_confidence": 0.3
+    },
     "pump": {
-      "test_interval_seconds": 172800,
       "test_duration_seconds": 60,
       "cycle_pause_seconds": 5,
       "recovery_wait_seconds": 90,

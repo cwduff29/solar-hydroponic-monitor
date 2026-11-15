@@ -5,6 +5,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -69,8 +70,10 @@ class PumpTestCase(unittest.TestCase):
                             ('main_pump_planned_off', False), ('main_pump_planned_restart', None),
                             ('smoothed_flow_inlet', 0.0), ('smoothed_flow_outlet', 0.0),
                             ('flow_history_inlet', []), ('flow_history_outlet', []),
-                            ('last_pump_test', 0), ('_saved_pump_state', None)):
+                            ('_saved_pump_state', None)):
             setattr(w, name, value)
+        w.pump_state = w.pump_test.new_state(0)
+        w.alert_manager.forget('backup_pump_test_failed')
         for a in w._FLOW_ALERT_TYPES:
             w.alert_manager.forget(a)       # also drops the email cooldown of earlier tests
         if os.path.exists(w.PUMP_STATE_FILE):
@@ -124,7 +127,9 @@ class TestRecovery(PumpTestCase):
         self.assertTrue(self.backup_on())
         self.assertIn('Warning: Running on Backup Pump - Main Pump Failed', self.emails)
         with open(w.PUMP_STATE_FILE) as f:
-            self.assertTrue(json.load(f)['backup_pump_active'])   # failover is persisted at once
+            saved = json.load(f)
+        self.assertTrue(saved['backup_pump_active'])              # failover is persisted at once
+        self.assertIsNotNone(saved['last_recheck_ts'])            # and the recheck clock started
 
     def test_backup_failing_later_does_not_switch_main_on(self):
         w = self.w
@@ -159,19 +164,69 @@ class TestBackupPumpTest(PumpTestCase):
     def setUp(self):
         super().setUp()
         self.w.smoothed_flow_inlet = 1.7          # main pump healthy before the test
+        self.pt = self.w.pump_test
 
-    def test_dead_backup_pump_fails_the_test(self):
+    def test_first_failure_schedules_a_retest(self):
+        w = self.w
+        self.working = {'main'}                   # backup pump dead
+        w.run_pump_test(self.pt.ACTION_TEST)
+        self.assertEqual(self.emails, ['Backup Pump Test FAILED - Retest in 60 min'])
+        self.assertIsNotNone(w.pump_state['retest_due_ts'])
+        self.assertFalse(w.alert_manager.is_active('backup_pump_test_failed'))
+        self.assertTrue(self.main_on())
+        self.assertFalse(self.backup_on())
+
+    def test_failed_retest_is_final_and_raises_the_alert(self):
+        w = self.w
         self.working = {'main'}
-        self.w.test_backup_pump()
+        w.run_pump_test(self.pt.ACTION_TEST)
+        self.emails.clear()
+        w.run_pump_test(self.pt.ACTION_RETEST)
         self.assertEqual(self.emails, ['FAIL Backup Pump Test FAILED'])
+        self.assertIsNone(w.pump_state['retest_due_ts'])
+        self.assertEqual(w.pump_state['last_result'], 'fail')
+        self.assertTrue(w.alert_manager.is_active('backup_pump_test_failed'))
         self.assertTrue(self.main_on())
         self.assertFalse(self.backup_on())
 
-    def test_working_backup_pump_passes(self):
-        self.w.test_backup_pump()
+    def test_passing_retest_clears_the_failure(self):
+        w = self.w
+        self.working = {'main'}
+        w.run_pump_test(self.pt.ACTION_TEST)
+        self.working = {'main', 'backup'}         # the air lock cleared
+        self.emails.clear()
+        w.run_pump_test(self.pt.ACTION_RETEST)
         self.assertEqual(self.emails, ['OK Backup Pump Test PASSED'])
+        self.assertIsNone(w.pump_state['retest_due_ts'])
+        self.assertFalse(w.alert_manager.is_active('backup_pump_test_failed'))
+
+    def test_working_backup_pump_passes_and_sets_the_baseline(self):
+        w = self.w
+        w.run_pump_test(self.pt.ACTION_TEST)
+        self.assertEqual(self.emails, ['OK Backup Pump Test PASSED'])
+        self.assertEqual(w.pump_state['last_result'], 'pass')
+        self.assertAlmostEqual(w.pump_state['good_backup_flow_lpm'], 127 / 75, places=2)
         self.assertTrue(self.main_on())
         self.assertFalse(self.backup_on())
+        with open(w.PUMP_STATE_FILE) as f:
+            self.assertEqual(json.load(f)['last_result'], 'pass')
+
+    def test_much_weaker_backup_pump_warns(self):
+        w = self.w
+        w.pump_state['good_backup_flow_lpm'] = 5.0          # it used to deliver 5 L/min
+        w.run_pump_test(self.pt.ACTION_TEST)                # now 1.7: under half
+        self.assertEqual(self.emails, ['WARN Backup Pump Test: Flow Lower Than Before'])
+        self.assertEqual(w.pump_state['last_result'], 'warn')
+        self.assertEqual(w.pump_state['good_backup_flow_lpm'], 5.0)   # a WARN does not lower the baseline
+
+    def test_result_is_exported(self):
+        w = self.w
+        w.run_pump_test(self.pt.ACTION_TEST)
+        w.write_prometheus_metrics(temps={}, conditions={})
+        with open(w.PROM_OUTPUT_FILE) as f:
+            text = f.read()
+        self.assertIn('waterflow_backup_pump_test_result{source="waterflow"} 0', text)
+        self.assertIn('waterflow_backup_pump_test_flow_lpm{source="waterflow"} 1.693', text)
 
     def test_recheck_with_dead_main_stays_on_backup(self):
         w = self.w
@@ -180,9 +235,10 @@ class TestBackupPumpTest(PumpTestCase):
         w.set_main_pump(False)
         w.set_backup_pump(True)
         self.main_on_during_failover = 0
-        w.test_backup_pump()
+        w.run_pump_test(self.pt.ACTION_RECHECK)
         self.assertEqual(self.emails, ['Main Pump Still Failing - Remaining on Backup'])
         self.assertTrue(w.backup_pump_active)
+        self.assertIsNotNone(w.pump_state['last_recheck_ts'])
         self.assertFalse(self.main_on())
         self.assertTrue(self.backup_on())
 
@@ -191,7 +247,7 @@ class TestBackupPumpTest(PumpTestCase):
         w.backup_pump_active = True
         w.set_main_pump(False)
         w.set_backup_pump(True)
-        w.test_backup_pump()
+        w.run_pump_test(self.pt.ACTION_RECHECK)
         self.assertEqual(self.emails, ['Main Pump Recovered - Failover Cleared'])
         self.assertFalse(w.backup_pump_active)
         self.assertTrue(self.main_on())
@@ -199,19 +255,105 @@ class TestBackupPumpTest(PumpTestCase):
         with open(w.PUMP_STATE_FILE) as f:
             self.assertFalse(json.load(f)['backup_pump_active'])
 
-    def test_test_is_not_started_during_a_low_flow_episode_or_without_soc(self):
+
+class TestPumpTestSchedule(PumpTestCase):
+    """next_pump_test_action(): the controller's inputs to pump_test.decide()."""
+
+    def setUp(self):
+        super().setUp()
         w = self.w
-        w.last_pump_test = 1.0                    # long overdue
-        with mock.patch.object(w, 'read_battery_soc', lambda: 90.0):
-            self.assertTrue(w.should_run_pump_test())
-            w.low_flow_start_time = w._now()
-            self.assertFalse(w.should_run_pump_test())
-            w.low_flow_start_time = None
-            w.main_pump_planned_off = True
-            self.assertFalse(w.should_run_pump_test())
-            w.main_pump_planned_off = False
-        with mock.patch.object(w, 'read_battery_soc', lambda: None):
-            self.assertFalse(w.should_run_pump_test())
+        self.pt = w.pump_test
+        self.wall = [time.mktime((2026, 11, 16, 11, 0, 0, 0, 0, -1))]      # 11:00 local, inside the window
+        self.soc = [90.0]
+        patches = [
+            mock.patch.object(w.time, 'time', lambda: self.wall[0]),
+            mock.patch.object(w, '_system_uptime_seconds', lambda: 7200.0),
+            mock.patch.object(w, 'read_battery_soc', lambda: self.soc[0]),
+            mock.patch.object(w, 'battery_soc_confidence', 0.9),
+            mock.patch.object(w, 'PUMP_TEST_CFG', self.pt.config({})),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        w.smoothed_flow_inlet = 1.7
+
+    def test_never_tested_runs_in_the_window(self):
+        self.assertEqual(self.w.next_pump_test_action(), self.pt.ACTION_TEST)
+
+    def test_not_outside_the_window(self):
+        self.wall[0] = time.mktime((2026, 11, 16, 20, 0, 0, 0, 0, -1))
+        self.assertIsNone(self.w.next_pump_test_action())
+
+    def test_not_right_after_boot(self):
+        with mock.patch.object(self.w, '_system_uptime_seconds', lambda: 120.0):
+            self.assertIsNone(self.w.next_pump_test_action())
+
+    def test_blocked_by_low_flow_planned_off_alert_or_battery(self):
+        w = self.w
+        w.low_flow_start_time = w._now()
+        self.assertIsNone(w.next_pump_test_action())
+        w.low_flow_start_time = None
+        w.main_pump_planned_off = True
+        self.assertIsNone(w.next_pump_test_action())
+        w.main_pump_planned_off = False
+        w.smoothed_flow_inlet = 0.1
+        self.assertIsNone(w.next_pump_test_action())
+        w.smoothed_flow_inlet = 1.7
+        w.alert_manager.should_send('leak_detected')
+        self.assertIsNone(w.next_pump_test_action())
+        w.alert_manager.forget('leak_detected')
+        for soc in (None, 30.0):
+            self.soc[0] = soc
+            self.assertIsNone(w.next_pump_test_action())
+        self.soc[0] = 90.0
+        self.assertEqual(w.next_pump_test_action(), self.pt.ACTION_TEST)     # still due once clear
+
+    def test_maintenance_flag_stops_tests(self):
+        with mock.patch.object(self.w, 'DISABLE_PUMP_TESTING', True):
+            self.assertIsNone(self.w.next_pump_test_action())
+
+    def test_weekly_after_a_pass_and_retest_after_a_fail(self):
+        w = self.w
+        w.run_pump_test(self.pt.ACTION_TEST)                    # passes at 11:00
+        self.wall[0] += 3 * 86400
+        self.assertIsNone(w.next_pump_test_action())
+        self.wall[0] += 4 * 86400
+        self.assertEqual(w.next_pump_test_action(), self.pt.ACTION_TEST)
+        self.working = {'main'}
+        w.run_pump_test(self.pt.ACTION_TEST)                    # fails
+        self.assertIsNone(w.next_pump_test_action())
+        self.wall[0] += 3600
+        self.assertEqual(w.next_pump_test_action(), self.pt.ACTION_RETEST)
+
+    def test_failover_rechecks_the_main_pump_a_day_later(self):
+        w = self.w
+        w.backup_pump_active = True
+        self.pt.set_failover(w.pump_state, True, self.wall[0])
+        self.assertIsNone(w.next_pump_test_action())            # recheck clock just started
+        self.wall[0] += 86400
+        self.assertEqual(w.next_pump_test_action(), self.pt.ACTION_RECHECK)
+
+    def test_config_section_defaults_and_bad_window(self):
+        w = self.w
+        real = w.get_config
+
+        def cfg_with(section, old_soc=None):
+            values = {'waterflow.pump_test': section,
+                      'waterflow.battery_load_shedding.skip_pump_test_below_pct': old_soc}
+            return mock.patch.object(w, 'get_config', lambda k, d=None: values[k] if k in values else real(k, d))
+
+        with cfg_with({}):                                      # the Pi's config before this change
+            cfg = w._load_pump_test_config()
+        self.assertEqual(cfg['test_interval_seconds'], 604800)
+        self.assertEqual(cfg['test_window_hours'], [10, 15])
+        with cfg_with({}, old_soc=40):                          # old SOC limit is still honoured
+            self.assertEqual(w._load_pump_test_config()['min_soc_pct'], 40)
+        with cfg_with({'min_soc_pct': 60, 'test_window_hours': [9, 17]}, old_soc=40):
+            cfg = w._load_pump_test_config()
+        self.assertEqual((cfg['min_soc_pct'], cfg['test_window_hours']), (60, [9, 17]))
+        for bad in ([15, 10], [10], 'noon', [10, 30]):
+            with cfg_with({'test_window_hours': bad}), self.assertLogs(level='ERROR'):
+                self.assertEqual(w._load_pump_test_config()['test_window_hours'], [10, 15])
 
 
 class TestPumpStatePersistence(PumpTestCase):
@@ -219,45 +361,71 @@ class TestPumpStatePersistence(PumpTestCase):
         w = self.w
         self.assertNotIn(w.PUMP_STATE_FILE, (w.STATE_FILE, w.PERSISTENT_STATE_FILE))
 
-    def test_failover_survives_a_restart_and_alert_saves(self):
+    def _restart(self):
         w = self.w
-        w.backup_pump_active, w.last_pump_test = True, 12345.0
-        w.save_state()
-        w.alert_manager.save()                    # used to overwrite the pump state
-        w.backup_pump_active, w.last_pump_test, w._saved_pump_state = False, 0, None
+        w.backup_pump_active, w._saved_pump_state = False, None
+        w.pump_state = w.pump_test.new_state(0)
         w.set_main_pump(True)
         w.set_backup_pump(False)
-        w.load_state()                            # restart or reboot: same persistent file
+        w.load_state()
+
+    def test_failover_survives_a_restart_and_alert_saves(self):
+        w = self.w
+        w.backup_pump_active = True
+        w.pump_test.set_failover(w.pump_state, True, 12345.0)
+        w.save_state()
+        w.alert_manager.save()                    # used to overwrite the pump state
+        self._restart()
         self.assertTrue(w.backup_pump_active)
-        self.assertEqual(w.last_pump_test, 12345.0)
+        self.assertEqual(w.pump_state['last_recheck_ts'], 12345.0)
         self.assertFalse(self.main_on())
         self.assertTrue(self.backup_on())
 
-    def test_first_run_starts_the_test_clock_and_keeps_it(self):
+    def test_test_history_survives_a_restart(self):
         w = self.w
-        w.load_state()                            # no file yet
-        first = w.last_pump_test
-        self.assertGreater(first, 0)
+        w.smoothed_flow_inlet = 1.7
+        w.run_pump_test(w.pump_test.ACTION_TEST)
+        before = dict(w.pump_state)
+        self._restart()
+        self.assertEqual(w.pump_state, before)
+        self.assertEqual(w.pump_state['last_result'], 'pass')
+
+    def test_first_run_is_untested_on_the_main_pump(self):
+        w = self.w
+        self._restart()                           # no file yet
         self.assertFalse(w.backup_pump_active)
-        w.last_pump_test, w._saved_pump_state = 0, None
-        w.load_state()                            # next boot
-        self.assertEqual(w.last_pump_test, first)
+        self.assertIsNone(w.pump_state['last_test_ts'])
+        self.assertTrue(os.path.exists(w.PUMP_STATE_FILE))
+
+    def test_older_state_file_keeps_the_failover_flag(self):
+        w = self.w
+        os.makedirs(os.path.dirname(w.PUMP_STATE_FILE), exist_ok=True)
+        with open(w.PUMP_STATE_FILE, 'w') as f:
+            json.dump({'last_pump_test': 1794694851.3, 'backup_pump_active': True, 'last_save': 1.0}, f)
+        self._restart()
+        self.assertTrue(w.backup_pump_active)
+        self.assertTrue(self.backup_on())
+        self.assertIsNone(w.pump_state['last_test_ts'])       # that timestamp was not a real test
+        with open(w.PUMP_STATE_FILE) as f:
+            saved = json.load(f)
+        self.assertIn('created_ts', saved)                    # rewritten in the new format
+        self.assertNotIn('last_pump_test', saved)
 
     def test_unchanged_state_is_not_rewritten(self):
         w = self.w
-        w.last_pump_test = 500.0
         w.save_state()
-        with mock.patch.object(w.os, 'replace', side_effect=AssertionError('rewrote an unchanged file')):
+        with mock.patch.object(w.pump_test, 'save_state', side_effect=AssertionError('rewrote an unchanged file')):
             w.save_state()
 
     def test_corrupt_file_falls_back_to_main_pump(self):
         w = self.w
         os.makedirs(os.path.dirname(w.PUMP_STATE_FILE), exist_ok=True)
         with open(w.PUMP_STATE_FILE, 'w') as f:
-            f.write('{"last_pump_te')
-        w.load_state()
+            f.write('{"backup_pump_act')
+        with self.assertLogs(level='ERROR'):
+            self._restart()
         self.assertFalse(w.backup_pump_active)
-        self.assertGreater(w.last_pump_test, 0)
+        self.assertTrue(self.main_on())
 
 
 if __name__ == '__main__':

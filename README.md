@@ -36,6 +36,7 @@ mode is disabled.
 - Solar charge controller monitoring (battery SOC, voltage, solar power, faults)
 - Dual flow sensor monitoring with leak detection and flow imbalance alerts
 - Automatic pump recovery and backup pump failover
+- Weekly backup pump test in a daytime window, with a retest after a failure and a warning when the backup pump weakens
 - Battery SOC estimator (net-current coulomb counting with voltage anchors; see below)
 - Battery-based load shedding (aeration reduced/disabled at low SOC; the SOC tier caps the water-temperature tier)
 - Optional low-SOC main pump power saving (reduced PWM speed, bounded on/off cycling; off by default)
@@ -72,7 +73,7 @@ battery_shutdown.py  ──┘        (tmpfs)
 | `prometheus` (optional) | Local scraper on port 9090, only with `INSTALL_LOCAL_PROMETHEUS=1` |
 
 Shared code lives in `monitor_common.py` (alert management, email, watchdog, daily summaries).
-Pure decision logic lives in `soc_estimator.py` and `load_shedding.py` (no hardware access, unit-tested).
+Pure decision logic lives in `soc_estimator.py`, `load_shedding.py` and `pump_test.py` (no hardware access, unit-tested).
 All tunable values are in `config.json` — no code edits needed for threshold changes.
 
 ## Installation
@@ -162,6 +163,7 @@ Key sections:
 | `waterflow.temperature` | Temperature alert thresholds (°C) |
 | `waterflow.battery_load_shedding` | SOC thresholds for aeration load shedding (+ tier hysteresis) |
 | `waterflow.main_pump_low_soc` | Optional low-SOC main pump tiers (`enabled: false` by default) |
+| `waterflow.pump_test` | Backup pump test schedule, preconditions and grading |
 | `shutdown` | `battery_shutdown.py` mode (`alert` / `halt` / `off`) and critical condition |
 | `waterflow.aeration` | Aeration on/off cycle timing |
 | `waterflow.gpio` | GPIO pin assignments for relays and flow sensors |
@@ -237,6 +239,37 @@ never trigger pump recovery/failover; a pump that fails to restart is detected n
 that. Metrics: `waterflow_main_pump_mode`, `waterflow_main_pump_planned_off`.
 
 Measure the pump's current at 70/60/50 % duty before enabling `reduced_speed`.
+
+## Backup Pump Test
+
+The controller tests the backup pump on a schedule: it switches the main pump off, runs the
+backup pump alone for `waterflow.pump.test_duration_seconds`, measures the flow, and switches
+back. `pump_test.py` decides when a test runs and how it is graded (`waterflow.pump_test`):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `test_interval_seconds` | 604800 | Routine test every 7 days, counted in calendar days so it stays on the same weekday |
+| `test_window_hours` | `[10, 15]` | Tests and main-pump rechecks only start between these local hours |
+| `min_uptime_seconds` | 3600 | No test in the first hour after a boot |
+| `min_soc_pct`, `min_soc_confidence` | 50, 0.3 | Battery must be above this SOC, with a confident estimate |
+| `retest_delay_seconds` | 3600 | A first FAIL is retested once after this delay; only a second FAIL is final |
+| `backup_degraded_ratio` | 0.5 | WARN when the backup delivers less than this fraction of its last passing test |
+| `failover_recheck_interval_seconds` | 86400 | While running on the backup pump, try the main pump again this often |
+
+A test also waits for healthy main-pump flow and no active flow alert; a test that cannot run
+stays due and runs later that day or the next. A system that has never been tested runs its
+first test at the next window. Results: **PASS**, **WARN** (works, but much weaker than before),
+**FAIL** (below the low-flow threshold). A final FAIL sets the `backup_pump_test_failed` alert
+until a later test passes.
+
+Metrics: `waterflow_backup_pump_test_result` (0 pass, 1 warn, 2 fail),
+`waterflow_backup_pump_test_flow_lpm`, `waterflow_backup_pump_test_timestamp_seconds`,
+`waterflow_alert_backup_pump_test_failed`. The schedule, the last result and the failover flag
+are kept in `/var/lib/renogy/waterflow_pump_state.json`.
+
+`waterflow.maintenance.disable_pump_testing` stops routine tests and rechecks.
+`waterflow.pump.test_interval_seconds` and `battery_load_shedding.skip_pump_test_below_pct` from
+older configs are replaced by this section (the old SOC limit is still read if `min_soc_pct` is absent).
 
 ## DS18B20 Sensor Identification
 
@@ -418,6 +451,7 @@ solar-hydroponic-monitor/
 ├── renogy_extended.py            # Renogy Modbus driver with batch reads
 ├── soc_estimator.py              # Battery SOC estimator (pure, no hardware)
 ├── load_shedding.py              # Load-shedding / low-SOC pump decisions (pure)
+├── pump_test.py                  # Backup pump test scheduling and grading (pure)
 ├── battery_shutdown.py           # Critical-battery alert (or halt)
 ├── waterflow_enhanced_failsafe.py # Hydroponic system controller
 ├── scripts/
