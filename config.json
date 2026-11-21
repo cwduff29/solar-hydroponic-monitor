@@ -69,7 +69,7 @@
     },
     "flow": {
       "calibration_factor": 7.5,
-      "calibration_factor_inlet": 5.2,
+      "calibration_factor_inlet": 7.5,
       "calibration_factor_outlet": 7.5,
       "measurement_duration_seconds": 10,
       "min_flow_threshold_lpm": 0.25,
