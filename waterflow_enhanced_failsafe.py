@@ -1077,6 +1077,25 @@ def check_daily_summary():
 # MONITOR FLOW
 # ============================================================================
 
+def _flow_is_low():
+    """True when both flow sensors read below MIN_FLOW_THRESHOLD.
+
+    When only the feed (inlet) sensor reads low the water is still reaching
+    the drain, so this is a sensor stall, not low flow: log it (throttled)
+    and keep the pumps as they are.
+    """
+    if smoothed_flow_inlet >= MIN_FLOW_THRESHOLD:
+        return False
+    if smoothed_flow_outlet >= MIN_FLOW_THRESHOLD:
+        _log_throttled(
+            'feed_sensor_disagrees',
+            f"Feed sensor reads {smoothed_flow_inlet:.3f} L/min but the drain sensor shows "
+            f"{smoothed_flow_outlet:.3f} L/min - treating as a feed sensor stall, not low flow",
+            interval=600)
+        return False
+    return True
+
+
 def monitor_flow(elapsed_s=None):
     """Process a completed flow measurement and check for issues.
 
@@ -1244,8 +1263,13 @@ def monitor_flow(elapsed_s=None):
             if avg_24h is not None and avg_1h is not None and avg_1h >= avg_24h * 0.90:
                 alert_manager.clear('flow_degradation_trend')
 
-        # Check for low flow
-        if smoothed_flow_inlet < MIN_FLOW_THRESHOLD:
+        # Check for low flow. Both sensors must agree: the feed sensor can stall
+        # for several minutes after a pump change while water keeps flowing,
+        # and a false recovery cycles and fails over pumps for nothing. If the
+        # pumps really stop, the drain sensor follows within a minute or two
+        # as the channels empty. A dead drain sensor (reading 0) leaves the
+        # feed sensor in charge, as before.
+        if _flow_is_low():
             if low_flow_start_time is None:
                 low_flow_start_time = _now()
             elif _now() - low_flow_start_time > FLOW_WARNING_DELAY:

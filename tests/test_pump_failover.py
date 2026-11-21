@@ -99,6 +99,30 @@ class TestRecovery(PumpTestCase):
     def _sustained_low_flow(self):
         self.w.low_flow_start_time = self.w._now() - self.w.FLOW_WARNING_DELAY - 60
 
+    def test_feed_sensor_stall_with_drain_flowing_is_not_low_flow(self):
+        w = self.w
+        self.working = {'main', 'backup'}
+        self._sustained_low_flow()
+        with mock.patch.object(w, 'attempt_pump_recovery') as recovery, \
+                self.assertLogs(level='WARNING') as logs:
+            for _ in range(8):
+                w.count_inlet, w.count_outlet = 0, 127   # feed rotor stuck, water still draining
+                w.monitor_flow()
+        recovery.assert_not_called()
+        self.assertTrue(self.main_on())
+        self.assertFalse(w.backup_pump_active)
+        self.assertIsNone(w.low_flow_start_time)        # the old episode was cleared
+        self.assertNotIn('Warning: Low Water Flow', self.emails)
+        self.assertTrue(any('feed sensor stall' in m for m in logs.output))
+
+    def test_drain_sensor_dead_leaves_the_feed_sensor_in_charge(self):
+        w = self.w
+        self.working = {'backup'}
+        self._sustained_low_flow()
+        w.count_inlet = w.count_outlet = 0               # main dead, drain sensor also reads 0
+        w.monitor_flow()
+        self.assertTrue(w.backup_pump_active)
+
     def test_both_pumps_dead_recovers_once_then_alerts(self):
         w = self.w
         self.working = set()                      # e.g. empty reservoir

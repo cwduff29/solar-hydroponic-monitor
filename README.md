@@ -401,6 +401,8 @@ Common scenarios:
 
 `disable_flow_alerts` also stops automatic pump recovery and failover, because those are triggered by the low-flow check.
 
+The low-flow check needs **both** flow sensors below `min_flow_threshold_lpm`. If only the feed (inlet) sensor reads low while the drain (outlet) sensor still shows flow, it is treated as a feed sensor stall: a warning is logged at most every 10 minutes and the pumps are left alone. A drain sensor that reads 0 leaves the feed sensor in charge.
+
 ## Hardware Setup Scripts
 
 Two helper scripts in `scripts/` make initial hardware wiring verification much easier.
